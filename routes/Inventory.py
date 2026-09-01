@@ -2494,3 +2494,707 @@ def get_main_inventory(
                 total_pages
         }
     }
+
+
+
+# =========================================================
+# SALE STATUSES THAT BLOCK STOCK
+#
+# These sales have not yet affected physical inventory
+# but the quantity is reserved for the customer.
+# =========================================================
+
+BLOCKING_SALE_STATUSES = [
+    "Pending",
+    # "Confirmed",
+    "Ready to Pick-up",
+    "Out for Delivery"
+]
+
+
+# =========================================================
+# GET UNBLOCKED STOCK
+#
+# GET /orders/inventory/v1/unblocked
+#
+# Formula:
+#
+# Available Stock
+# = Purchase Completed
+# + Sales Return Completed
+# - Sale Delivered
+# - Purchase Return Completed
+#
+# Blocked Stock
+# = Confirmed / Ready to Pick-up / Out for Delivery Sales
+#
+# Unblocked Stock
+# = Available Stock - Blocked Stock
+# =========================================================
+
+
+@router.get("/inventory/unblocked")
+def get_unblocked_stock(
+
+    page: int = Query(
+        1,
+        ge=1
+    ),
+
+    limit: int = Query(
+        20,
+        ge=1,
+        le=100
+    ),
+
+    product_id: Optional[str] = None,
+
+    variant_id: Optional[str] = None,
+
+    search: Optional[str] = None
+):
+
+    skip = (page - 1) * limit
+
+    # =====================================================
+    # PRODUCT FILTER
+    # =====================================================
+
+    item_filter = {}
+
+    if product_id:
+
+        item_filter["items.product_id"] = validate_object_id(
+            product_id,
+            "product_id"
+        )
+
+    if variant_id:
+
+        item_filter["items.variant_id"] = validate_object_id(
+            variant_id,
+            "variant_id"
+        )
+
+    # =====================================================
+    # MATCH INVENTORY TRANSACTIONS
+    # =====================================================
+
+    inventory_query = {
+
+        "record_status": "active",
+
+        "type": {
+            "$in": MAIN_INVENTORY_TYPES
+        },
+
+        "$or": [
+
+            {
+                "type": "sale",
+                "status": "Delivered"
+            },
+
+            {
+                "type": {
+                    "$in": [
+                        "purchase",
+                        "purchase_return",
+                        "sale_return"
+                    ]
+                },
+                "status": "Completed"
+            }
+        ]
+    }
+
+    # =====================================================
+    # MATCH BLOCKED SALES
+    # =====================================================
+
+    blocked_query = {
+
+        "record_status": "active",
+
+        "type": "sale",
+
+        "status": {
+            "$in": BLOCKING_SALE_STATUSES
+        }
+    }
+
+    # =====================================================
+    # AGGREGATION
+    # =====================================================
+
+    pipeline = [
+
+        # -------------------------------------------------
+        # GET BOTH INVENTORY + BLOCKED SALES
+        # -------------------------------------------------
+
+        {
+            "$facet": {
+
+                # =========================================
+                # AVAILABLE STOCK
+                # =========================================
+
+                "available": [
+
+                    {
+                        "$match": inventory_query
+                    },
+
+                    {
+                        "$unwind": "$items"
+                    },
+
+                    {
+                        "$match": item_filter
+                    },
+
+                    {
+                        "$group": {
+
+                            "_id": {
+
+                                "product_id":
+                                    "$items.product_id",
+
+                                "variant_id":
+                                    "$items.variant_id"
+                            },
+
+                            "purchase_quantity": {
+
+                                "$sum": {
+
+                                    "$cond": [
+
+                                        {
+                                            "$eq": [
+                                                "$type",
+                                                "purchase"
+                                            ]
+                                        },
+
+                                        "$items.quantity",
+
+                                        0
+                                    ]
+                                }
+                            },
+
+                            "sale_quantity": {
+
+                                "$sum": {
+
+                                    "$cond": [
+
+                                        {
+                                            "$eq": [
+                                                "$type",
+                                                "sale"
+                                            ]
+                                        },
+
+                                        "$items.quantity",
+
+                                        0
+                                    ]
+                                }
+                            },
+
+                            "purchase_return_quantity": {
+
+                                "$sum": {
+
+                                    "$cond": [
+
+                                        {
+                                            "$eq": [
+                                                "$type",
+                                                "purchase_return"
+                                            ]
+                                        },
+
+                                        "$items.quantity",
+
+                                        0
+                                    ]
+                                }
+                            },
+
+                            "sale_return_quantity": {
+
+                                "$sum": {
+
+                                    "$cond": [
+
+                                        {
+                                            "$eq": [
+                                                "$type",
+                                                "sale_return"
+                                            ]
+                                        },
+
+                                        "$items.quantity",
+
+                                        0
+                                    ]
+                                }
+                            }
+                        }
+                    },
+
+                    {
+                        "$addFields": {
+
+                            "available_quantity": {
+
+                                "$add": [
+
+                                    "$purchase_quantity",
+
+                                    "$sale_return_quantity",
+
+                                    {
+                                        "$multiply": [
+                                            "$sale_quantity",
+                                            -1
+                                        ]
+                                    },
+
+                                    {
+                                        "$multiply": [
+                                            "$purchase_return_quantity",
+                                            -1
+                                        ]
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                ],
+
+                # =========================================
+                # BLOCKED STOCK
+                # =========================================
+
+                "blocked": [
+
+                    {
+                        "$match": blocked_query
+                    },
+
+                    {
+                        "$unwind": "$items"
+                    },
+
+                    {
+                        "$match": item_filter
+                    },
+
+                    {
+                        "$group": {
+
+                            "_id": {
+
+                                "product_id":
+                                    "$items.product_id",
+
+                                "variant_id":
+                                    "$items.variant_id"
+                            },
+
+                            "blocked_quantity": {
+
+                                "$sum":
+                                    "$items.quantity"
+                            }
+                        }
+                    }
+                ]
+            }
+        },
+
+        # =================================================
+        # CONVERT ARRAYS INTO MAPS
+        # =================================================
+
+        {
+            "$project": {
+
+                "available": 1,
+
+                "blocked": 1
+            }
+        }
+    ]
+
+    result = list(
+        orders_collection.aggregate(
+            pipeline
+        )
+    )
+
+    if not result:
+
+        return {
+            "success": True,
+            "data": [],
+            "pagination": {
+                "page": page,
+                "limit": limit,
+                "total": 0,
+                "total_pages": 0
+            }
+        }
+
+    result = result[0]
+
+    # =====================================================
+    # CREATE AVAILABLE MAP
+    # =====================================================
+
+    available_map = {
+
+        (
+            row["_id"]["product_id"],
+            row["_id"]["variant_id"]
+        ): row
+
+        for row in result.get(
+            "available",
+            []
+        )
+    }
+
+    # =====================================================
+    # CREATE BLOCKED MAP
+    # =====================================================
+
+    blocked_map = {
+
+        (
+            row["_id"]["product_id"],
+            row["_id"]["variant_id"]
+        ): row.get(
+            "blocked_quantity",
+            0
+        )
+
+        for row in result.get(
+            "blocked",
+            []
+        )
+    }
+
+    # =====================================================
+    # COMBINE PRODUCT + VARIANT
+    # =====================================================
+
+    keys = set(
+        available_map.keys()
+    ) | set(
+        blocked_map.keys()
+    )
+
+    rows = []
+
+    for key in keys:
+
+        product_id_value = key[0]
+
+        variant_id_value = key[1]
+
+        available_row = available_map.get(
+            key,
+            {}
+        )
+
+        available_quantity = available_row.get(
+            "available_quantity",
+            0
+        )
+
+        blocked_quantity = blocked_map.get(
+            key,
+            0
+        )
+
+        # =================================================
+        # UNBLOCKED STOCK
+        # =================================================
+
+        unblocked_quantity = (
+            available_quantity
+            - blocked_quantity
+        )
+
+        # Never expose negative sellable stock
+        unblocked_quantity = max(
+            unblocked_quantity,
+            0
+        )
+
+        rows.append({
+
+            "product_id":
+                str(product_id_value)
+                if product_id_value
+                else None,
+
+            "variant_id":
+                str(variant_id_value)
+                if variant_id_value
+                else None,
+
+            "available_quantity":
+                available_quantity,
+
+            "blocked_quantity":
+                blocked_quantity,
+
+            "unblocked_quantity":
+                unblocked_quantity
+        })
+
+    # =====================================================
+    # COLLECT IDS
+    # =====================================================
+
+    product_ids = {
+
+        row["product_id"]
+
+        for row in rows
+
+        if row["product_id"]
+    }
+
+    variant_ids = {
+
+        row["variant_id"]
+
+        for row in rows
+
+        if row["variant_id"]
+    }
+
+    product_object_ids = [
+        ObjectId(pid)
+        for pid in product_ids
+    ]
+
+    variant_object_ids = [
+        ObjectId(vid)
+        for vid in variant_ids
+    ]
+
+    # =====================================================
+    # PRODUCT MAP
+    # =====================================================
+
+    product_map = {}
+
+    if product_object_ids:
+
+        products = list(
+            products_collection.find({
+
+                "_id": {
+                    "$in": product_object_ids
+                }
+            })
+        )
+
+        product_map = {
+
+            str(product["_id"]):
+                product
+
+            for product in products
+        }
+
+    # =====================================================
+    # VARIANT MAP
+    # =====================================================
+
+    variant_map = {}
+
+    if variant_object_ids:
+
+        variants = list(
+            product_variants_collection.find({
+
+                "_id": {
+                    "$in": variant_object_ids
+                }
+            })
+        )
+
+        variant_map = {
+
+            str(variant["_id"]):
+                variant
+
+            for variant in variants
+        }
+
+    # =====================================================
+    # BUILD RESPONSE
+    # =====================================================
+
+    data = []
+
+    for row in rows:
+
+        product = product_map.get(
+            row["product_id"],
+            {}
+        )
+
+        variant = variant_map.get(
+            row["variant_id"],
+            {}
+        )
+
+        data.append({
+
+            "product_id":
+                row["product_id"],
+
+            "product_name":
+                product.get(
+                    "name"
+                ),
+
+            "variant_id":
+                row["variant_id"],
+
+            "variant_name":
+                variant.get(
+                    "name"
+                ),
+
+            "sku":
+                variant.get(
+                    "sku"
+                ),
+
+            "available_quantity":
+                row[
+                    "available_quantity"
+                ],
+
+            "blocked_quantity":
+                row[
+                    "blocked_quantity"
+                ],
+
+            "unblocked_quantity":
+                row[
+                    "unblocked_quantity"
+                ]
+        })
+
+    # =====================================================
+    # SEARCH
+    # =====================================================
+
+    if search:
+
+        search_lower = (
+            search.strip().lower()
+        )
+
+        data = [
+
+            item
+
+            for item in data
+
+            if (
+
+                search_lower
+                in str(
+                    item.get(
+                        "product_name"
+                    ) or ""
+                ).lower()
+
+                or
+
+                search_lower
+                in str(
+                    item.get(
+                        "variant_name"
+                    ) or ""
+                ).lower()
+
+                or
+
+                search_lower
+                in str(
+                    item.get(
+                        "sku"
+                    ) or ""
+                ).lower()
+            )
+        ]
+
+    # =====================================================
+    # SORT
+    # =====================================================
+
+    data.sort(
+        key=lambda x: (
+            x.get(
+                "product_name"
+            ) or "",
+            x.get(
+                "variant_name"
+            ) or ""
+        )
+    )
+
+    # =====================================================
+    # PAGINATION
+    # =====================================================
+
+    total = len(data)
+
+    total_pages = (
+        (total + limit - 1)
+        // limit
+    )
+
+    data = data[
+        skip:
+        skip + limit
+    ]
+
+    # =====================================================
+    # RESPONSE
+    # =====================================================
+
+    return {
+
+        "success": True,
+
+        "data": data,
+
+        "pagination": {
+
+            "page": page,
+
+            "limit": limit,
+
+            "total": total,
+
+            "total_pages":
+                total_pages
+        }
+    }
