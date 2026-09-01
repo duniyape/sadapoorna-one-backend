@@ -2504,11 +2504,17 @@ def get_main_inventory(
 # but the quantity is reserved for the customer.
 # =========================================================
 
+UNBLOCKED_INVENTORY_TYPES = [
+    "sale",
+    "sale_return",
+    "Warehouse_IN",
+]
+
 BLOCKING_SALE_STATUSES = [
     "Pending",
     # "Confirmed",
     "Ready to Pick-up",
-    "Out for Delivery"
+    "Out for Delivery",
 ]
 
 
@@ -2520,13 +2526,14 @@ BLOCKING_SALE_STATUSES = [
 # Formula:
 #
 # Available Stock
-# = Purchase Completed
-# + Sales Return Completed
+# = Sale Return Completed
+# + Warehouse_IN Completed
 # - Sale Delivered
-# - Purchase Return Completed
 #
 # Blocked Stock
-# = Confirmed / Ready to Pick-up / Out for Delivery Sales
+# = Pending Sale
+# + Ready to Pick-up Sale
+# + Out for Delivery Sale
 #
 # Unblocked Stock
 # = Available Stock - Blocked Stock
@@ -2535,7 +2542,6 @@ BLOCKING_SALE_STATUSES = [
 
 @router.get("/inventory/unblocked")
 def get_unblocked_stock(
-
     page: int = Query(
         1,
         ge=1
@@ -2555,6 +2561,7 @@ def get_unblocked_stock(
 ):
 
     skip = (page - 1) * limit
+
 
     # =====================================================
     # PRODUCT FILTER
@@ -2576,8 +2583,14 @@ def get_unblocked_stock(
             "variant_id"
         )
 
+
     # =====================================================
     # MATCH INVENTORY TRANSACTIONS
+    #
+    # ONLY:
+    # sale
+    # sale_return
+    # Warehouse_IN
     # =====================================================
 
     inventory_query = {
@@ -2585,31 +2598,54 @@ def get_unblocked_stock(
         "record_status": "active",
 
         "type": {
-            "$in": MAIN_INVENTORY_TYPES
+            "$in": UNBLOCKED_INVENTORY_TYPES
         },
 
         "$or": [
 
+            # ---------------------------------------------
+            # SALE DELIVERED
+            # ---------------------------------------------
+
             {
                 "type": "sale",
+
                 "status": "Delivered"
             },
 
+            # ---------------------------------------------
+            # SALE RETURN COMPLETED
+            # ---------------------------------------------
+
             {
-                "type": {
-                    "$in": [
-                        "purchase",
-                        "purchase_return",
-                        "sale_return"
-                    ]
-                },
+                "type": "sale_return",
+
+                "status": "Completed"
+            },
+
+            # ---------------------------------------------
+            # WAREHOUSE IN COMPLETED
+            # ---------------------------------------------
+
+            {
+                "type": "Warehouse_IN",
+
                 "status": "Completed"
             }
         ]
     }
 
+
     # =====================================================
     # MATCH BLOCKED SALES
+    #
+    # ONLY sale orders with:
+    #
+    # Pending
+    # Ready to Pick-up
+    # Out for Delivery
+    #
+    # Confirmed is NOT included.
     # =====================================================
 
     blocked_query = {
@@ -2623,15 +2659,16 @@ def get_unblocked_stock(
         }
     }
 
+
     # =====================================================
     # AGGREGATION
     # =====================================================
 
     pipeline = [
 
-        # -------------------------------------------------
-        # GET BOTH INVENTORY + BLOCKED SALES
-        # -------------------------------------------------
+        # =================================================
+        # GET BOTH AVAILABLE + BLOCKED STOCK
+        # =================================================
 
         {
             "$facet": {
@@ -2666,25 +2703,11 @@ def get_unblocked_stock(
                                     "$items.variant_id"
                             },
 
-                            "purchase_quantity": {
 
-                                "$sum": {
-
-                                    "$cond": [
-
-                                        {
-                                            "$eq": [
-                                                "$type",
-                                                "purchase"
-                                            ]
-                                        },
-
-                                        "$items.quantity",
-
-                                        0
-                                    ]
-                                }
-                            },
+                            # ---------------------------------
+                            # SALE QUANTITY
+                            # Delivered sales subtract stock
+                            # ---------------------------------
 
                             "sale_quantity": {
 
@@ -2706,25 +2729,11 @@ def get_unblocked_stock(
                                 }
                             },
 
-                            "purchase_return_quantity": {
 
-                                "$sum": {
-
-                                    "$cond": [
-
-                                        {
-                                            "$eq": [
-                                                "$type",
-                                                "purchase_return"
-                                            ]
-                                        },
-
-                                        "$items.quantity",
-
-                                        0
-                                    ]
-                                }
-                            },
+                            # ---------------------------------
+                            # SALE RETURN QUANTITY
+                            # Completed returns add stock
+                            # ---------------------------------
 
                             "sale_return_quantity": {
 
@@ -2744,9 +2753,40 @@ def get_unblocked_stock(
                                         0
                                     ]
                                 }
+                            },
+
+
+                            # ---------------------------------
+                            # WAREHOUSE IN QUANTITY
+                            # Completed Warehouse_IN adds stock
+                            # ---------------------------------
+
+                            "warehouse_in_quantity": {
+
+                                "$sum": {
+
+                                    "$cond": [
+
+                                        {
+                                            "$eq": [
+                                                "$type",
+                                                "Warehouse_IN"
+                                            ]
+                                        },
+
+                                        "$items.quantity",
+
+                                        0
+                                    ]
+                                }
                             }
                         }
                     },
+
+
+                    # =====================================
+                    # CALCULATE AVAILABLE STOCK
+                    # =====================================
 
                     {
                         "$addFields": {
@@ -2755,20 +2795,15 @@ def get_unblocked_stock(
 
                                 "$add": [
 
-                                    "$purchase_quantity",
-
                                     "$sale_return_quantity",
 
-                                    {
-                                        "$multiply": [
-                                            "$sale_quantity",
-                                            -1
-                                        ]
-                                    },
+                                    "$warehouse_in_quantity",
 
                                     {
                                         "$multiply": [
-                                            "$purchase_return_quantity",
+
+                                            "$sale_quantity",
+
                                             -1
                                         ]
                                     }
@@ -2777,6 +2812,7 @@ def get_unblocked_stock(
                         }
                     }
                 ],
+
 
                 # =========================================
                 # BLOCKED STOCK
@@ -2819,8 +2855,9 @@ def get_unblocked_stock(
             }
         },
 
+
         # =================================================
-        # CONVERT ARRAYS INTO MAPS
+        # PROJECT
         # =================================================
 
         {
@@ -2833,26 +2870,45 @@ def get_unblocked_stock(
         }
     ]
 
+
+    # =====================================================
+    # EXECUTE AGGREGATION
+    # =====================================================
+
     result = list(
         orders_collection.aggregate(
             pipeline
         )
     )
 
+
+    # =====================================================
+    # EMPTY RESULT
+    # =====================================================
+
     if not result:
 
         return {
+
             "success": True,
+
             "data": [],
+
             "pagination": {
+
                 "page": page,
+
                 "limit": limit,
+
                 "total": 0,
+
                 "total_pages": 0
             }
         }
 
+
     result = result[0]
+
 
     # =====================================================
     # CREATE AVAILABLE MAP
@@ -2870,6 +2926,7 @@ def get_unblocked_stock(
             []
         )
     }
+
 
     # =====================================================
     # CREATE BLOCKED MAP
@@ -2891,17 +2948,24 @@ def get_unblocked_stock(
         )
     }
 
+
     # =====================================================
-    # COMBINE PRODUCT + VARIANT
+    # COMBINE PRODUCT + VARIANT KEYS
     # =====================================================
 
-    keys = set(
-        available_map.keys()
-    ) | set(
-        blocked_map.keys()
+    keys = (
+        set(available_map.keys())
+        |
+        set(blocked_map.keys())
     )
 
+
     rows = []
+
+
+    # =====================================================
+    # CALCULATE UNBLOCKED STOCK
+    # =====================================================
 
     for key in keys:
 
@@ -2909,20 +2973,24 @@ def get_unblocked_stock(
 
         variant_id_value = key[1]
 
+
         available_row = available_map.get(
             key,
             {}
         )
+
 
         available_quantity = available_row.get(
             "available_quantity",
             0
         )
 
+
         blocked_quantity = blocked_map.get(
             key,
             0
         )
+
 
         # =================================================
         # UNBLOCKED STOCK
@@ -2930,39 +2998,57 @@ def get_unblocked_stock(
 
         unblocked_quantity = (
             available_quantity
-            - blocked_quantity
+            -
+            blocked_quantity
         )
 
+
         # Never expose negative sellable stock
+
         unblocked_quantity = max(
             unblocked_quantity,
             0
         )
 
+
         rows.append({
 
             "product_id":
+
                 str(product_id_value)
+
                 if product_id_value
+
                 else None,
+
 
             "variant_id":
+
                 str(variant_id_value)
+
                 if variant_id_value
+
                 else None,
 
+
             "available_quantity":
+
                 available_quantity,
 
+
             "blocked_quantity":
+
                 blocked_quantity,
 
+
             "unblocked_quantity":
+
                 unblocked_quantity
         })
 
+
     # =====================================================
-    # COLLECT IDS
+    # COLLECT PRODUCT IDS
     # =====================================================
 
     product_ids = {
@@ -2974,6 +3060,11 @@ def get_unblocked_stock(
         if row["product_id"]
     }
 
+
+    # =====================================================
+    # COLLECT VARIANT IDS
+    # =====================================================
+
     variant_ids = {
 
         row["variant_id"]
@@ -2983,21 +3074,33 @@ def get_unblocked_stock(
         if row["variant_id"]
     }
 
+
+    # =====================================================
+    # CONVERT TO OBJECT IDS
+    # =====================================================
+
     product_object_ids = [
+
         ObjectId(pid)
+
         for pid in product_ids
     ]
 
+
     variant_object_ids = [
+
         ObjectId(vid)
+
         for vid in variant_ids
     ]
+
 
     # =====================================================
     # PRODUCT MAP
     # =====================================================
 
     product_map = {}
+
 
     if product_object_ids:
 
@@ -3010,6 +3113,7 @@ def get_unblocked_stock(
             })
         )
 
+
         product_map = {
 
             str(product["_id"]):
@@ -3018,11 +3122,13 @@ def get_unblocked_stock(
             for product in products
         }
 
+
     # =====================================================
     # VARIANT MAP
     # =====================================================
 
     variant_map = {}
+
 
     if variant_object_ids:
 
@@ -3035,6 +3141,7 @@ def get_unblocked_stock(
             })
         )
 
+
         variant_map = {
 
             str(variant["_id"]):
@@ -3043,11 +3150,13 @@ def get_unblocked_stock(
             for variant in variants
         }
 
+
     # =====================================================
     # BUILD RESPONSE
     # =====================================================
 
     data = []
+
 
     for row in rows:
 
@@ -3056,49 +3165,59 @@ def get_unblocked_stock(
             {}
         )
 
+
         variant = variant_map.get(
             row["variant_id"],
             {}
         )
+
 
         data.append({
 
             "product_id":
                 row["product_id"],
 
+
             "product_name":
                 product.get(
                     "name"
                 ),
 
+
             "variant_id":
                 row["variant_id"],
+
 
             "variant_name":
                 variant.get(
                     "name"
                 ),
 
+
             "sku":
                 variant.get(
                     "sku"
                 ),
+
 
             "available_quantity":
                 row[
                     "available_quantity"
                 ],
 
+
             "blocked_quantity":
                 row[
                     "blocked_quantity"
                 ],
+
 
             "unblocked_quantity":
                 row[
                     "unblocked_quantity"
                 ]
         })
+
 
     # =====================================================
     # SEARCH
@@ -3109,6 +3228,7 @@ def get_unblocked_stock(
         search_lower = (
             search.strip().lower()
         )
+
 
         data = [
 
@@ -3122,43 +3242,58 @@ def get_unblocked_stock(
                 in str(
                     item.get(
                         "product_name"
-                    ) or ""
+                    )
+                    or ""
                 ).lower()
 
+
                 or
+
 
                 search_lower
                 in str(
                     item.get(
                         "variant_name"
-                    ) or ""
+                    )
+                    or ""
                 ).lower()
 
+
                 or
+
 
                 search_lower
                 in str(
                     item.get(
                         "sku"
-                    ) or ""
+                    )
+                    or ""
                 ).lower()
             )
         ]
+
 
     # =====================================================
     # SORT
     # =====================================================
 
     data.sort(
+
         key=lambda x: (
+
             x.get(
                 "product_name"
-            ) or "",
+            )
+            or "",
+
+
             x.get(
                 "variant_name"
-            ) or ""
+            )
+            or ""
         )
     )
+
 
     # =====================================================
     # PAGINATION
@@ -3166,15 +3301,21 @@ def get_unblocked_stock(
 
     total = len(data)
 
+
     total_pages = (
+
         (total + limit - 1)
-        // limit
+
+        //
+        limit
     )
+
 
     data = data[
         skip:
         skip + limit
     ]
+
 
     # =====================================================
     # RESPONSE
