@@ -3339,3 +3339,960 @@ def get_unblocked_stock(
                 total_pages
         }
     }
+
+# =========================================================
+# VEHICLE INVENTORY
+# =========================================================
+#
+# Calculation:
+#
+# Vehicle_IN  -> ADD
+# Vehicle_OUT -> SUBTRACT
+#
+# Only:
+# status = Completed
+# record_status = active
+#
+# Grouped by:
+# vehicle_id + product_id + variant_id
+#
+# Vehicle Inventory =
+# Vehicle_IN - Vehicle_OUT
+#
+# =========================================================
+
+
+VEHICLE_INVENTORY_TYPES = [
+    "Vehicle_IN",
+    "Vehicle_OUT"
+]
+
+
+# =========================================================
+# GET VEHICLE INVENTORY
+#
+# GET /inventory/vehicle-inventory
+# =========================================================
+
+
+@router.get(
+    "/vehicle-inventory",
+    tags=["Inventory"]
+)
+def get_vehicle_inventory(
+
+    page: int = Query(
+        1,
+        ge=1
+    ),
+
+    limit: int = Query(
+        20,
+        ge=1,
+        le=100
+    ),
+
+    vehicle_id: Optional[str] = None,
+
+    product_id: Optional[str] = None,
+
+    variant_id: Optional[str] = None,
+
+    search: Optional[str] = None
+):
+
+    skip = (
+        page - 1
+    ) * limit
+
+
+    # =====================================================
+    # BASE QUERY
+    # =====================================================
+
+    query = {
+
+        "type": {
+            "$in":
+                VEHICLE_INVENTORY_TYPES
+        },
+
+        "status":
+            "Completed",
+
+        "record_status":
+            "active",
+
+        "vehicle_id": {
+            "$exists":
+                True,
+
+            "$ne":
+                None
+        }
+    }
+
+
+    # =====================================================
+    # VEHICLE FILTER
+    # =====================================================
+
+    if vehicle_id:
+
+        query[
+            "vehicle_id"
+        ] = validate_object_id(
+            vehicle_id,
+            "vehicle_id"
+        )
+
+
+    # =====================================================
+    # PRODUCT FILTER
+    # =====================================================
+
+    if product_id:
+
+        query[
+            "items.product_id"
+        ] = validate_object_id(
+            product_id,
+            "product_id"
+        )
+
+
+    # =====================================================
+    # VARIANT FILTER
+    # =====================================================
+
+    if variant_id:
+
+        query[
+            "items.variant_id"
+        ] = validate_object_id(
+            variant_id,
+            "variant_id"
+        )
+
+
+    # =====================================================
+    # AGGREGATION
+    # =====================================================
+
+    pipeline = [
+
+        # -------------------------------------------------
+        # FILTER VEHICLE TRANSACTIONS
+        # -------------------------------------------------
+
+        {
+            "$match":
+                query
+        },
+
+
+        # -------------------------------------------------
+        # SPLIT ITEMS
+        # -------------------------------------------------
+
+        {
+            "$unwind":
+                "$items"
+        },
+
+
+        # -------------------------------------------------
+        # APPLY PRODUCT / VARIANT FILTER
+        # -------------------------------------------------
+
+        {
+            "$match": {
+
+                **(
+
+                    {
+                        "items.product_id":
+                            query[
+                                "items.product_id"
+                            ]
+                    }
+
+                    if "items.product_id"
+                    in query
+
+                    else {}
+                ),
+
+                **(
+
+                    {
+                        "items.variant_id":
+                            query[
+                                "items.variant_id"
+                            ]
+                    }
+
+                    if "items.variant_id"
+                    in query
+
+                    else {}
+                )
+            }
+        },
+
+
+        # -------------------------------------------------
+        # GROUP
+        #
+        # vehicle + product + variant
+        # -------------------------------------------------
+
+        {
+            "$group": {
+
+                "_id": {
+
+                    "vehicle_id":
+                        "$vehicle_id",
+
+                    "product_id":
+                        "$items.product_id",
+
+                    "variant_id":
+                        "$items.variant_id"
+                },
+
+
+                # -----------------------------------------
+                # VEHICLE IN
+                # -----------------------------------------
+
+                "vehicle_in_quantity": {
+
+                    "$sum": {
+
+                        "$cond": [
+
+                            {
+                                "$eq": [
+                                    "$type",
+                                    "Vehicle_IN"
+                                ]
+                            },
+
+                            "$items.quantity",
+
+                            0
+                        ]
+                    }
+                },
+
+
+                # -----------------------------------------
+                # VEHICLE OUT
+                # -----------------------------------------
+
+                "vehicle_out_quantity": {
+
+                    "$sum": {
+
+                        "$cond": [
+
+                            {
+                                "$eq": [
+                                    "$type",
+                                    "Vehicle_OUT"
+                                ]
+                            },
+
+                            "$items.quantity",
+
+                            0
+                        ]
+                    }
+                }
+            }
+        },
+
+
+        # -------------------------------------------------
+        # CALCULATE AVAILABLE VEHICLE INVENTORY
+        # -------------------------------------------------
+
+        {
+            "$addFields": {
+
+                "available_quantity": {
+
+                    "$subtract": [
+
+                        "$vehicle_in_quantity",
+
+                        "$vehicle_out_quantity"
+                    ]
+                }
+            }
+        },
+
+
+        # -------------------------------------------------
+        # SORT
+        # -------------------------------------------------
+
+        {
+            "$sort": {
+
+                "_id.vehicle_id": 1,
+
+                "_id.product_id": 1,
+
+                "_id.variant_id": 1
+            }
+        }
+    ]
+
+
+    # =====================================================
+    # EXECUTE AGGREGATION
+    # =====================================================
+
+    inventory_rows = list(
+        orders_collection.aggregate(
+            pipeline
+        )
+    )
+
+
+    # =====================================================
+    # COLLECT IDS
+    # =====================================================
+
+    vehicle_ids = set()
+
+    product_ids = set()
+
+    variant_ids = set()
+
+
+    for row in inventory_rows:
+
+        row_id = row.get(
+            "_id",
+            {}
+        )
+
+
+        if row_id.get(
+            "vehicle_id"
+        ):
+
+            vehicle_ids.add(
+                row_id[
+                    "vehicle_id"
+                ]
+            )
+
+
+        if row_id.get(
+            "product_id"
+        ):
+
+            product_ids.add(
+                row_id[
+                    "product_id"
+                ]
+            )
+
+
+        if row_id.get(
+            "variant_id"
+        ):
+
+            variant_ids.add(
+                row_id[
+                    "variant_id"
+                ]
+            )
+
+
+    # =====================================================
+    # VEHICLE MAP
+    # =====================================================
+
+    vehicle_map = {}
+
+
+    if vehicle_ids:
+
+        vehicles = list(
+            vehicles_collection.find({
+
+                "_id": {
+                    "$in":
+                        list(
+                            vehicle_ids
+                        )
+                }
+            })
+        )
+
+
+        vehicle_map = {
+
+            vehicle["_id"]:
+                vehicle
+
+            for vehicle in vehicles
+        }
+
+
+    # =====================================================
+    # PRODUCT MAP
+    # =====================================================
+
+    product_map = {}
+
+
+    if product_ids:
+
+        products = list(
+            products_collection.find({
+
+                "_id": {
+                    "$in":
+                        list(
+                            product_ids
+                        )
+                }
+            })
+        )
+
+
+        product_map = {
+
+            product["_id"]:
+                product
+
+            for product in products
+        }
+
+
+    # =====================================================
+    # VARIANT MAP
+    # =====================================================
+
+    variant_map = {}
+
+
+    if variant_ids:
+
+        variants = list(
+            product_variants_collection.find({
+
+                "_id": {
+                    "$in":
+                        list(
+                            variant_ids
+                        )
+                }
+            })
+        )
+
+
+        variant_map = {
+
+            variant["_id"]:
+                variant
+
+            for variant in variants
+        }
+
+
+    # =====================================================
+    # UNIT + PACKAGING IDS
+    # =====================================================
+
+    unit_ids = set()
+
+    packaging_ids = set()
+
+
+    for variant in variant_map.values():
+
+        unit_id = variant.get(
+            "unit_id"
+        )
+
+        packaging_type_id = variant.get(
+            "packaging_type_id"
+        )
+
+
+        if unit_id:
+
+            unit_ids.add(
+                unit_id
+            )
+
+
+        if packaging_type_id:
+
+            packaging_ids.add(
+                packaging_type_id
+            )
+
+
+    # =====================================================
+    # UNIT MAP
+    # =====================================================
+
+    unit_map = {}
+
+
+    if unit_ids:
+
+        units = list(
+            product_units_collection.find({
+
+                "_id": {
+                    "$in":
+                        list(
+                            unit_ids
+                        )
+                }
+            })
+        )
+
+
+        unit_map = {
+
+            unit["_id"]:
+                unit
+
+            for unit in units
+        }
+
+
+    # =====================================================
+    # PACKAGING MAP
+    # =====================================================
+
+    packaging_map = {}
+
+
+    if packaging_ids:
+
+        packaging_types = list(
+            packing_types_collection.find({
+
+                "_id": {
+                    "$in":
+                        list(
+                            packaging_ids
+                        )
+                }
+            })
+        )
+
+
+        packaging_map = {
+
+            packaging["_id"]:
+                packaging
+
+            for packaging in packaging_types
+        }
+
+
+    # =====================================================
+    # BUILD RESPONSE
+    # =====================================================
+
+    data = []
+
+
+    for row in inventory_rows:
+
+        row_id = row.get(
+            "_id",
+            {}
+        )
+
+
+        vehicle_id_value = row_id.get(
+            "vehicle_id"
+        )
+
+        product_id_value = row_id.get(
+            "product_id"
+        )
+
+        variant_id_value = row_id.get(
+            "variant_id"
+        )
+
+
+        vehicle = vehicle_map.get(
+            vehicle_id_value,
+            {}
+        )
+
+
+        product = product_map.get(
+            product_id_value,
+            {}
+        )
+
+
+        variant = variant_map.get(
+            variant_id_value,
+            {}
+        )
+
+
+        # =================================================
+        # UNIT
+        # =================================================
+
+        unit = ""
+
+        unit_id = variant.get(
+            "unit_id"
+        )
+
+
+        if unit_id:
+
+            unit_data = unit_map.get(
+                unit_id,
+                {}
+            )
+
+
+            unit = (
+                unit_data.get(
+                    "symbol"
+                )
+                or ""
+            )
+
+
+        # =================================================
+        # PACKAGE
+        # =================================================
+
+        package = ""
+
+        packaging_type_id = variant.get(
+            "packaging_type_id"
+        )
+
+
+        if packaging_type_id:
+
+            package_data = packaging_map.get(
+                packaging_type_id,
+                {}
+            )
+
+
+            package = (
+                package_data.get(
+                    "name"
+                )
+                or ""
+            )
+
+
+        # =================================================
+        # VEHICLE DETAILS
+        # =================================================
+
+        vehicle_data = {
+
+            "id":
+                str(
+                    vehicle_id_value
+                )
+                if vehicle_id_value
+                else None,
+
+            "vehicle_number":
+                vehicle.get(
+                    "vehicle_number"
+                ),
+
+            "model":
+                vehicle.get(
+                    "model"
+                ),
+
+            "vehicle_type":
+                vehicle.get(
+                    "vehicle_type"
+                )
+        }
+
+
+        # =================================================
+        # RESPONSE
+        # =================================================
+
+        data.append({
+
+            "vehicle":
+                vehicle_data,
+
+
+            "product_id":
+                str(
+                    product_id_value
+                )
+                if product_id_value
+                else None,
+
+
+            "product_name":
+                product.get(
+                    "name"
+                ),
+
+
+            "variant_id":
+                str(
+                    variant_id_value
+                )
+                if variant_id_value
+                else None,
+
+
+            "variant_name":
+                variant.get(
+                    "name"
+                ),
+
+
+            "variant_qty":
+                variant.get(
+                    "quantity"
+                ),
+
+
+            "sku":
+                variant.get(
+                    "sku"
+                ),
+
+
+            "unit":
+                unit,
+
+
+            "package":
+                package,
+
+
+            "vehicle_in_quantity":
+                row.get(
+                    "vehicle_in_quantity",
+                    0
+                ),
+
+
+            "vehicle_out_quantity":
+                row.get(
+                    "vehicle_out_quantity",
+                    0
+                ),
+
+
+            "available_quantity":
+                row.get(
+                    "available_quantity",
+                    0
+                )
+        })
+
+
+    # =====================================================
+    # SEARCH
+    # =====================================================
+
+    if search:
+
+        search_lower = (
+            search.strip().lower()
+        )
+
+
+        data = [
+
+            item
+
+            for item in data
+
+            if (
+
+                search_lower
+                in str(
+                    item.get(
+                        "vehicle",
+                        {}
+                    ).get(
+                        "vehicle_number"
+                    )
+                    or ""
+                ).lower()
+
+
+                or
+
+
+                search_lower
+                in str(
+                    item.get(
+                        "vehicle",
+                        {}
+                    ).get(
+                        "model"
+                    )
+                    or ""
+                ).lower()
+
+
+                or
+
+
+                search_lower
+                in str(
+                    item.get(
+                        "vehicle",
+                        {}
+                    ).get(
+                        "vehicle_type"
+                    )
+                    or ""
+                ).lower()
+
+
+                or
+
+
+                search_lower
+                in str(
+                    item.get(
+                        "product_name"
+                    )
+                    or ""
+                ).lower()
+
+
+                or
+
+
+                search_lower
+                in str(
+                    item.get(
+                        "variant_name"
+                    )
+                    or ""
+                ).lower()
+
+
+                or
+
+
+                search_lower
+                in str(
+                    item.get(
+                        "sku"
+                    )
+                    or ""
+                ).lower()
+            )
+        ]
+
+
+    # =====================================================
+    # SORT
+    # =====================================================
+
+    data.sort(
+
+        key=lambda x: (
+
+            x.get(
+                "vehicle",
+                {}
+            ).get(
+                "vehicle_number"
+            )
+            or "",
+
+
+            x.get(
+                "product_name"
+            )
+            or "",
+
+
+            x.get(
+                "variant_name"
+            )
+            or ""
+        )
+    )
+
+
+    # =====================================================
+    # PAGINATION
+    # =====================================================
+
+    total = len(data)
+
+
+    total_pages = (
+
+        (
+            total
+            + limit
+            - 1
+        )
+        //
+        limit
+    )
+
+
+    data = data[
+        skip:
+        skip + limit
+    ]
+
+
+    # =====================================================
+    # RESPONSE
+    # =====================================================
+
+    return {
+
+        "success":
+            True,
+
+        "data":
+            data,
+
+        "pagination": {
+
+            "page":
+                page,
+
+            "limit":
+                limit,
+
+            "total":
+                total,
+
+            "total_pages":
+                total_pages
+        }
+    }
