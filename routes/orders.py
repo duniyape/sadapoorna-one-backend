@@ -3438,12 +3438,17 @@ def update_order_status(
         "user_id"
     )
 
-    current_vehicle_id = validate_object_id(
-        str(data["vehicle_id"]),
-        "vehicle_id"
-    ) if data.get("vehicle_id") else None
+    # =====================================================
+    # VEHICLE
+    # =====================================================
 
-    
+    current_vehicle_id = None
+
+    if data.vehicle_id:
+
+        current_vehicle_id = validate_vehicle(
+            data.vehicle_id
+        )
 
     # =====================================================
     # FIND ORDER
@@ -3451,8 +3456,7 @@ def update_order_status(
 
     order = orders_collection.find_one(
         {
-            "_id":
-                order_object_id
+            "_id": order_object_id
         }
     )
 
@@ -3509,42 +3513,48 @@ def update_order_status(
     # =====================================================
 
     tracking_entry = create_tracking_entry(
+
         status=data.status,
+
         user_id=str(
             current_user_id
         ),
+
         note=(
             data.note
-            or f"Order status changed "
-               f"from {current_status} "
-               f"to {data.status}"
+            or
+            f"Order status changed "
+            f"from {current_status} "
+            f"to {data.status}"
         ),
     )
 
-   
     # =====================================================
-    # ATOMIC STATUS + TRACKING UPDATE
-    #
-    # The current status is included in the
-    # filter so two simultaneous requests
-    # cannot incorrectly create duplicate
-    # lifecycle events.
+    # UPDATE DATA
     # =====================================================
 
     update_data = {
-    
-            "status":
-                data.status,
-    
-            "updated_at":
-                utc_now(),
-        }
-    
+
+        "status":
+            data.status,
+
+        "updated_at":
+            utc_now(),
+    }
+
+    # =====================================================
+    # VEHICLE
+    # =====================================================
+
     if current_vehicle_id is not None:
 
         update_data[
             "vehicle_id"
         ] = current_vehicle_id
+
+    # =====================================================
+    # ATOMIC STATUS + TRACKING UPDATE
+    # =====================================================
 
     result = orders_collection.update_one(
 
@@ -3552,12 +3562,15 @@ def update_order_status(
             "_id":
                 order_object_id,
 
+            # IMPORTANT:
+            # Prevent concurrent status updates
             "status":
                 current_status,
         },
 
         {
-            "$set": update_data,
+            "$set":
+                update_data,
 
             "$push": {
 
@@ -3583,7 +3596,7 @@ def update_order_status(
         )
 
     # =====================================================
-    # GET UPDATED
+    # GET UPDATED ORDER
     # =====================================================
 
     updated_order = (
@@ -3596,7 +3609,7 @@ def update_order_status(
     )
 
     # =====================================================
-    # ENRICH
+    # ENRICH RESPONSE
     # =====================================================
 
     enriched_order = (
@@ -3604,6 +3617,10 @@ def update_order_status(
             [updated_order]
         )[0]
     )
+
+    # =====================================================
+    # RESPONSE
+    # =====================================================
 
     return {
 
@@ -3616,7 +3633,6 @@ def update_order_status(
         "data":
             enriched_order,
     }
-
 
 # =========================================================
 # UPDATE RECORD STATUS
