@@ -1,10 +1,10 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel, Field
 from typing import Optional, List, Literal
 from datetime import datetime, timedelta, timezone
 from bson import ObjectId
 from zoneinfo import ZoneInfo
-from routes.auth import (get_current_user)
+from routes.auth import get_current_user
 
 from pymongo import ReturnDocument
 
@@ -16,6 +16,7 @@ from database import (
     packing_types_collection,
     users_collection,
     warehouses_collection,
+    branches_collection,
     customers_collection,
     counters_collection,
     vendors_collection,
@@ -87,7 +88,7 @@ def utc_now():
     """
     Return current UTC datetime as a naive datetime.
 
-    MongoDB/PyMongo commonly stores BSON datetime values as UTC.
+    MongoDB/PyMongo stores BSON datetime values as UTC.
     """
 
     return datetime.now(timezone.utc).replace(
@@ -97,8 +98,7 @@ def utc_now():
 
 def convert_utc_to_ist(value):
     """
-    Recursively convert datetime values from UTC to IST
-    in dictionaries, lists and tuples.
+    Recursively convert datetime values from UTC to IST.
 
     Naive datetime values are assumed to be UTC.
     """
@@ -145,29 +145,24 @@ def get_utc_date_range(
     to_date: Optional[str],
 ):
     """
-    Convert user-provided IST dates into UTC datetime range.
+    Convert IST calendar dates into UTC boundaries.
 
     Example:
 
         from_date = 2026-08-26
         to_date   = 2026-08-26
 
-    Means:
+    IST range:
 
-        IST:
         2026-08-26 00:00:00
         to
         2026-08-27 00:00:00
 
-    Converted to UTC:
+    UTC range:
 
         2026-08-25 18:30:00
         to
         2026-08-26 18:30:00
-
-    MongoDB query uses:
-        $gte start_utc
-        $lt  end_utc
     """
 
     start_date = None
@@ -332,6 +327,48 @@ def serialize_order(order):
 
 
 # =========================================================
+# CREATE TRACKING ENTRY
+# =========================================================
+
+def create_tracking_entry(
+    status: str,
+    user_id: Optional[str] = None,
+    note: Optional[str] = None,
+):
+    """
+    Create one order lifecycle tracking entry.
+
+    Stored in MongoDB:
+
+        {
+            "status": "Confirmed",
+            "timestamp": UTC datetime,
+            "updated_by": ObjectId,
+            "note": "Order confirmed"
+        }
+    """
+
+    now = utc_now()
+
+    entry = {
+        "status": status,
+        "timestamp": now,
+        "note": note,
+        "updated_by": None,
+    }
+
+    if user_id and ObjectId.is_valid(
+        str(user_id)
+    ):
+
+        entry["updated_by"] = ObjectId(
+            str(user_id)
+        )
+
+    return entry
+
+
+# =========================================================
 # RESPONSE REFERENCE ENRICHMENT
 # =========================================================
 
@@ -346,19 +383,7 @@ def enrich_orders_with_references(
 
     MongoDB stores IDs.
 
-    API response returns expanded objects:
-
-        vendor
-        customer
-        vehicle
-
-    And item references:
-
-        product_name
-        variant_name
-        sku
-        unit
-        packaging_type
+    API response returns expanded references.
     """
 
     if not orders:
@@ -375,6 +400,9 @@ def enrich_orders_with_references(
     vendor_ids = set()
     customer_ids = set()
     vehicle_ids = set()
+
+    user_ids = set()
+    branch_ids = set()
 
     for order in orders:
 
@@ -430,6 +458,85 @@ def enrich_orders_with_references(
             )
 
         # -------------------------------------------------
+        # ASSIGNED EMPLOYEE
+        # -------------------------------------------------
+
+        assigned_employee_id = order.get(
+            "assigned_employee_id"
+        )
+
+        if isinstance(
+            assigned_employee_id,
+            ObjectId
+        ):
+
+            user_ids.add(
+                assigned_employee_id
+            )
+
+        # -------------------------------------------------
+        # CREATED BY
+        # -------------------------------------------------
+
+        created_by = order.get(
+            "created_by"
+        )
+
+        if isinstance(
+            created_by,
+            ObjectId
+        ):
+
+            user_ids.add(
+                created_by
+            )
+
+        # -------------------------------------------------
+        # BRANCH
+        # -------------------------------------------------
+
+        branch_id = order.get(
+            "branch_id"
+        )
+
+        if isinstance(
+            branch_id,
+            ObjectId
+        ):
+
+            branch_ids.add(
+                branch_id
+            )
+
+        # -------------------------------------------------
+        # TRACKING USERS
+        # -------------------------------------------------
+
+        for tracking_entry in order.get(
+            "tracking",
+            []
+        ):
+
+            if not isinstance(
+                tracking_entry,
+                dict
+            ):
+                continue
+
+            updated_by = tracking_entry.get(
+                "updated_by"
+            )
+
+            if isinstance(
+                updated_by,
+                ObjectId
+            ):
+
+                user_ids.add(
+                    updated_by
+                )
+
+        # -------------------------------------------------
         # ITEMS
         # -------------------------------------------------
 
@@ -466,9 +573,6 @@ def enrich_orders_with_references(
 
     # =====================================================
     # VENDOR LOOKUP
-    #
-    # IMPORTANT:
-    # Outside the order loop.
     # =====================================================
 
     vendors_map = {}
@@ -563,6 +667,66 @@ def enrich_orders_with_references(
         vehicles_map = {
             vehicle["_id"]: vehicle
             for vehicle in vehicles
+        }
+
+    # =====================================================
+    # USER LOOKUP
+    # =====================================================
+
+    users_map = {}
+
+    if user_ids:
+
+        users = list(
+            users_collection.find(
+                {
+                    "_id": {
+                        "$in": list(
+                            user_ids
+                        )
+                    }
+                },
+                {
+                    "_id": 1,
+                    "name": 1,
+                    "full_name": 1,
+                    "username": 1,
+                }
+            )
+        )
+
+        users_map = {
+            user["_id"]: user
+            for user in users
+        }
+
+    # =====================================================
+    # BRANCH LOOKUP
+    # =====================================================
+
+    branches_map = {}
+
+    if branch_ids:
+
+        branches = list(
+            branches_collection.find(
+                {
+                    "_id": {
+                        "$in": list(
+                            branch_ids
+                        )
+                    }
+                },
+                {
+                    "_id": 1,
+                    "name": 1
+                }
+            )
+        )
+
+        branches_map = {
+            branch["_id"]: branch
+            for branch in branches
         }
 
     # =====================================================
@@ -869,6 +1033,158 @@ def enrich_orders_with_references(
             response_order["vehicle"] = None
 
         # =================================================
+        # ASSIGNED EMPLOYEE
+        # =================================================
+
+        assigned_employee = users_map.get(
+            order.get("assigned_employee_id")
+        )
+
+        response_order.pop(
+            "assigned_employee_id",
+            None
+        )
+
+        if assigned_employee:
+
+            response_order["assigned_employee_name"] = (
+                assigned_employee.get("name")
+                or assigned_employee.get("full_name")
+                or assigned_employee.get("username")
+            )
+
+        else:
+
+            response_order[
+                "assigned_employee_name"
+            ] = None
+
+        # =================================================
+        # CREATED BY
+        # =================================================
+
+        created_by_user = users_map.get(
+            order.get("created_by")
+        )
+
+        response_order.pop(
+            "created_by",
+            None
+        )
+
+        if created_by_user:
+
+            response_order["created_by_name"] = (
+                created_by_user.get("name")
+                or created_by_user.get("full_name")
+                or created_by_user.get("username")
+            )
+
+        else:
+
+            response_order[
+                "created_by_name"
+            ] = None
+
+        # =================================================
+        # BRANCH
+        # =================================================
+
+        branch = branches_map.get(
+            order.get("branch_id")
+        )
+
+        response_order.pop(
+            "branch_id",
+            None
+        )
+
+        if branch:
+
+            response_order["branch"] = {
+
+                "id":
+                    str(branch["_id"]),
+
+                "name":
+                    branch.get("name")
+            }
+
+        else:
+
+            response_order["branch"] = None
+
+        # =================================================
+        # TRACKING
+        # =================================================
+
+        response_tracking = []
+
+        for tracking_entry in order.get(
+            "tracking",
+            []
+        ):
+
+            if not isinstance(
+                tracking_entry,
+                dict
+            ):
+                continue
+
+            updated_by = tracking_entry.get(
+                "updated_by"
+            )
+
+            updated_by_user = users_map.get(
+                updated_by
+            )
+
+            tracking_data = {
+
+                "status":
+                    tracking_entry.get(
+                        "status"
+                    ),
+
+                "timestamp":
+                    tracking_entry.get(
+                        "timestamp"
+                    ),
+
+                "updated_by":
+                    (
+                        str(updated_by)
+                        if isinstance(
+                            updated_by,
+                            ObjectId
+                        )
+                        else updated_by
+                    ),
+
+                "updated_by_name":
+                    (
+                        updated_by_user.get("name")
+                        or updated_by_user.get("full_name")
+                        or updated_by_user.get("username")
+                        if updated_by_user
+                        else None
+                    ),
+
+                "note":
+                    tracking_entry.get(
+                        "note"
+                    ),
+            }
+
+            response_tracking.append(
+                tracking_data
+            )
+
+        response_order[
+            "tracking"
+        ] = response_tracking
+
+        # =================================================
         # ITEMS
         # =================================================
 
@@ -941,21 +1257,17 @@ def enrich_orders_with_references(
 
                     unit_data = {
 
-                        "id": str(
-                            unit["_id"]
-                        ),
+                        "id":
+                            str(unit["_id"]),
 
-                        "name": unit.get(
-                            "name"
-                        ),
+                        "name":
+                            unit.get("name"),
 
-                        "symbol": unit.get(
-                            "symbol"
-                        ),
+                        "symbol":
+                            unit.get("symbol"),
 
-                        "short_name": unit.get(
-                            "short_name"
-                        ),
+                        "short_name":
+                            unit.get("short_name"),
                     }
 
             # ---------------------------------------------
@@ -978,13 +1290,11 @@ def enrich_orders_with_references(
 
                     packaging_data = {
 
-                        "id": str(
-                            packaging["_id"]
-                        ),
+                        "id":
+                            str(packaging["_id"]),
 
-                        "name": packaging.get(
-                            "name"
-                        ),
+                        "name":
+                            packaging.get("name"),
                     }
 
             # ---------------------------------------------
@@ -1000,16 +1310,18 @@ def enrich_orders_with_references(
 
                 investors_response.append({
 
-                    "investor_id": serialize_value(
-                        investor.get(
-                            "investor_id"
-                        )
-                    ),
+                    "investor_id":
+                        serialize_value(
+                            investor.get(
+                                "investor_id"
+                            )
+                        ),
 
-                    "quantity": investor.get(
-                        "quantity",
-                        0
-                    ),
+                    "quantity":
+                        investor.get(
+                            "quantity",
+                            0
+                        ),
                 })
 
             # ---------------------------------------------
@@ -1018,72 +1330,88 @@ def enrich_orders_with_references(
 
             response_item = {
 
-                "product_id": (
-                    str(product_id)
-                    if isinstance(
-                        product_id,
-                        ObjectId
-                    )
-                    else product_id
-                ),
+                "product_id":
+                    (
+                        str(product_id)
+                        if isinstance(
+                            product_id,
+                            ObjectId
+                        )
+                        else product_id
+                    ),
 
-                "variant_id": (
-                    str(variant_id)
-                    if isinstance(
-                        variant_id,
-                        ObjectId
-                    )
-                    else variant_id
-                ),
+                "variant_id":
+                    (
+                        str(variant_id)
+                        if isinstance(
+                            variant_id,
+                            ObjectId
+                        )
+                        else variant_id
+                    ),
 
-                "product_name": product_name,
+                "product_name":
+                    product_name,
 
-                "variant_name": variant_name,
+                "variant_name":
+                    variant_name,
 
-                "sku": sku,
+                "sku":
+                    sku,
 
-                "quantity": item.get(
-                    "quantity",
-                    0
-                ),
+                "quantity":
+                    item.get(
+                        "quantity",
+                        0
+                    ),
 
-                "rate": item.get(
-                    "rate",
-                    0
-                ),
+                "rate":
+                    item.get(
+                        "rate",
+                        0
+                    ),
 
-                "gst_percent": item.get(
-                    "gst_percent",
-                    0
-                ),
+                "gst_percent":
+                    item.get(
+                        "gst_percent",
+                        0
+                    ),
 
-                "gst_amount": item.get(
-                    "gst_amount",
-                    0
-                ),
+                "gst_amount":
+                    item.get(
+                        "gst_amount",
+                        0
+                    ),
 
-                "taxable_amount": item.get(
-                    "taxable_amount",
-                    0
-                ),
+                "taxable_amount":
+                    item.get(
+                        "taxable_amount",
+                        0
+                    ),
 
-                "total_amount": item.get(
-                    "total_amount",
-                    0
-                ),
+                "total_amount":
+                    item.get(
+                        "total_amount",
+                        0
+                    ),
 
-                "unit": unit_data,
+                "unit":
+                    unit_data,
 
-                "packaging_type": packaging_data,
+                "packaging_type":
+                    packaging_data,
 
-                "investors": investors_response,
+                "investors":
+                    investors_response,
             }
 
             response_items.append(
                 response_item
             )
 
-        response_order["items"] = response_items
+        response_order[
+            "items"
+        ] = response_items
 
         # =================================================
         # SERIALIZE
@@ -1173,8 +1501,13 @@ class OrderCreate(BaseModel):
 
     warehouse_id: Optional[str] = None
 
-    # NEW
     vehicle_id: Optional[str] = None
+
+    payment_mode: Optional[str] = None
+
+    branch_id: Optional[str] = None
+
+    assigned_employee_id: Optional[str] = None
 
     gst_type: Literal[
         "including",
@@ -1231,8 +1564,13 @@ class OrderUpdate(BaseModel):
 
     warehouse_id: Optional[str] = None
 
-    # NEW
     vehicle_id: Optional[str] = None
+
+    payment_mode: Optional[str] = None
+
+    branch_id: Optional[str] = None
+
+    assigned_employee_id: Optional[str] = None
 
     gst_type: Optional[
         Literal[
@@ -1276,6 +1614,12 @@ class OrderUpdate(BaseModel):
 
     notes: Optional[str] = None
 
+    # =====================================================
+    # TRACKING NOTE
+    # =====================================================
+
+    status_note: Optional[str] = None
+
 
 # =========================================================
 # STATUS UPDATE MODEL
@@ -1292,6 +1636,8 @@ class OrderStatusUpdate(BaseModel):
         "Delivered",
         "Cancelled",
     ]
+
+    note: Optional[str] = None
 
 
 # =========================================================
@@ -1457,6 +1803,78 @@ def validate_vehicle(
         )
 
     return vehicle_object_id
+
+
+# =========================================================
+# BRANCH VALIDATION
+# =========================================================
+
+def validate_branch(
+    branch_id: Optional[str]
+):
+
+    if not branch_id:
+
+        return None
+
+    branch_object_id = validate_object_id(
+        branch_id,
+        "branch_id"
+    )
+
+    branch = branches_collection.find_one(
+        {
+            "_id": branch_object_id
+        },
+        {
+            "_id": 1
+        }
+    )
+
+    if not branch:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Branch not found"
+        )
+
+    return branch_object_id
+
+
+# =========================================================
+# ASSIGNED EMPLOYEE VALIDATION
+# =========================================================
+
+def validate_assigned_employee(
+    employee_id: Optional[str]
+):
+
+    if not employee_id:
+
+        return None
+
+    employee_object_id = validate_object_id(
+        employee_id,
+        "assigned_employee_id"
+    )
+
+    employee = users_collection.find_one(
+        {
+            "_id": employee_object_id
+        },
+        {
+            "_id": 1
+        }
+    )
+
+    if not employee:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Assigned employee not found"
+        )
+
+    return employee_object_id
 
 
 # =========================================================
@@ -1861,7 +2279,8 @@ def generate_invoice_no(
 
 @router.post("/v1")
 def create_order(
-    data: OrderCreate
+    data: OrderCreate,
+    current_user=Depends(get_current_user)
 ):
 
     # =====================================================
@@ -1930,6 +2349,33 @@ def create_order(
     )
 
     # =====================================================
+    # BRANCH
+    # =====================================================
+
+    branch_object_id = validate_branch(
+        data.branch_id
+    )
+
+    # =====================================================
+    # ASSIGNED EMPLOYEE
+    # =====================================================
+
+    assigned_employee_object_id = (
+        validate_assigned_employee(
+            data.assigned_employee_id
+        )
+    )
+
+    # =====================================================
+    # CREATED BY
+    # =====================================================
+
+    created_by_object_id = validate_object_id(
+        str(current_user["user_id"]),
+        "user_id"
+    )
+
+    # =====================================================
     # BUILD ITEMS
     # =====================================================
 
@@ -1978,6 +2424,18 @@ def create_order(
     )
 
     # =====================================================
+    # INITIAL TRACKING
+    # =====================================================
+
+    initial_tracking = create_tracking_entry(
+        status=data.status,
+        user_id=str(
+            current_user["user_id"]
+        ),
+        note="Order created",
+    )
+
+    # =====================================================
     # ORDER DOCUMENT
     # =====================================================
 
@@ -2003,6 +2461,18 @@ def create_order(
 
         "vehicle_id":
             vehicle_object_id,
+
+        "payment_mode":
+            data.payment_mode,
+
+        "branch_id":
+            branch_object_id,
+
+        "assigned_employee_id":
+            assigned_employee_object_id,
+
+        "created_by":
+            created_by_object_id,
 
         "gst_type":
             data.gst_type,
@@ -2045,6 +2515,14 @@ def create_order(
 
         "notes":
             data.notes,
+
+        # =================================================
+        # ORDER TRACKING
+        # =================================================
+
+        "tracking": [
+            initial_tracking
+        ],
 
         "created_at":
             now,
@@ -2405,7 +2883,9 @@ def update_order(
 
     order_id: str,
 
-    data: OrderUpdate
+    data: OrderUpdate,
+
+    current_user=Depends(get_current_user)
 ):
 
     order_object_id = validate_object_id(
@@ -2430,17 +2910,21 @@ def update_order(
             detail="Order not found"
         )
 
+    current_status = existing_order.get(
+        "status",
+        "Pending"
+    )
+
     # =====================================================
     # FINAL STATUS
     # =====================================================
 
-    if existing_order.get(
-        "status"
-    ) in [
+    if current_status in [
         "Delivered",
         "Cancelled",
     ]:
 
+        # Only record_status can be changed
         if data.record_status is not None:
 
             update_data = {
@@ -2620,6 +3104,40 @@ def update_order(
         )
 
     # =====================================================
+    # PAYMENT MODE
+    # =====================================================
+
+    if data.payment_mode is not None:
+
+        update_data[
+            "payment_mode"
+        ] = data.payment_mode
+
+    # =====================================================
+    # BRANCH
+    # =====================================================
+
+    if data.branch_id is not None:
+
+        update_data[
+            "branch_id"
+        ] = validate_branch(
+            data.branch_id
+        )
+
+    # =====================================================
+    # ASSIGNED EMPLOYEE
+    # =====================================================
+
+    if data.assigned_employee_id is not None:
+
+        update_data[
+            "assigned_employee_id"
+        ] = validate_assigned_employee(
+            data.assigned_employee_id
+        )
+
+    # =====================================================
     # GST TYPE
     # =====================================================
 
@@ -2757,14 +3275,35 @@ def update_order(
     )
 
     # =====================================================
-    # STATUS
+    # STATUS CHANGE
     # =====================================================
+
+    status_changed = False
+
+    tracking_entry = None
 
     if data.status is not None:
 
-        update_data[
-            "status"
-        ] = data.status
+        if data.status != current_status:
+
+            status_changed = True
+
+            tracking_entry = create_tracking_entry(
+                status=data.status,
+                user_id=str(
+                    current_user["user_id"]
+                ),
+                note=(
+                    data.status_note
+                    or f"Order status changed "
+                       f"from {current_status} "
+                       f"to {data.status}"
+                ),
+            )
+
+            update_data[
+                "status"
+            ] = data.status
 
     # =====================================================
     # RECORD STATUS
@@ -2795,6 +3334,23 @@ def update_order(
     ] = utc_now()
 
     # =====================================================
+    # UPDATE OPERATIONS
+    # =====================================================
+
+    update_operations = {
+        "$set": update_data
+    }
+
+    if status_changed and tracking_entry:
+
+        update_operations[
+            "$push"
+        ] = {
+            "tracking":
+                tracking_entry
+        }
+
+    # =====================================================
     # UPDATE DATABASE
     # =====================================================
 
@@ -2805,10 +3361,7 @@ def update_order(
                 order_object_id
         },
 
-        {
-            "$set":
-                update_data
-        }
+        update_operations
     )
 
     # =====================================================
@@ -2840,7 +3393,13 @@ def update_order(
             True,
 
         "message":
-            "Order updated successfully",
+            (
+                "Order updated and status tracking "
+                "recorded successfully"
+                if status_changed
+                else
+                "Order updated successfully"
+            ),
 
         "data":
             enriched_order,
@@ -2859,7 +3418,9 @@ def update_order_status(
 
     order_id: str,
 
-    data: OrderStatusUpdate
+    data: OrderStatusUpdate,
+
+    current_user=Depends(get_current_user)
 ):
 
     order_object_id = validate_object_id(
@@ -2868,7 +3429,16 @@ def update_order_status(
     )
 
     # =====================================================
-    # FIND
+    # CURRENT USER
+    # =====================================================
+
+    current_user_id = validate_object_id(
+        str(current_user["user_id"]),
+        "user_id"
+    )
+
+    # =====================================================
+    # FIND ORDER
     # =====================================================
 
     order = orders_collection.find_one(
@@ -2895,6 +3465,20 @@ def update_order_status(
     )
 
     # =====================================================
+    # SAME STATUS
+    # =====================================================
+
+    if current_status == data.status:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Order is already "
+                f"{data.status}"
+            )
+        )
+
+    # =====================================================
     # FINAL STATUS
     # =====================================================
 
@@ -2907,19 +3491,45 @@ def update_order_status(
             status_code=400,
             detail=(
                 f"Order is already "
-                f"{current_status}"
+                f"{current_status} and "
+                f"cannot be changed"
             )
         )
 
     # =====================================================
-    # UPDATE
+    # TRACKING ENTRY
     # =====================================================
 
-    orders_collection.update_one(
+    tracking_entry = create_tracking_entry(
+        status=data.status,
+        user_id=str(
+            current_user_id
+        ),
+        note=(
+            data.note
+            or f"Order status changed "
+               f"from {current_status} "
+               f"to {data.status}"
+        ),
+    )
+
+    # =====================================================
+    # ATOMIC STATUS + TRACKING UPDATE
+    #
+    # The current status is included in the
+    # filter so two simultaneous requests
+    # cannot incorrectly create duplicate
+    # lifecycle events.
+    # =====================================================
+
+    result = orders_collection.update_one(
 
         {
             "_id":
-                order_object_id
+                order_object_id,
+
+            "status":
+                current_status,
         },
 
         {
@@ -2930,9 +3540,30 @@ def update_order_status(
 
                 "updated_at":
                     utc_now(),
+            },
+
+            "$push": {
+
+                "tracking":
+                    tracking_entry
             }
         }
     )
+
+    # =====================================================
+    # CONCURRENT UPDATE CHECK
+    # =====================================================
+
+    if result.modified_count == 0:
+
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Order status was changed by "
+                "another request. Please refresh "
+                "and try again."
+            )
+        )
 
     # =====================================================
     # GET UPDATED
@@ -3072,3 +3703,4 @@ def update_record_status(
         "data":
             enriched_order,
     }
+
