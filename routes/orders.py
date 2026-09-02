@@ -1626,6 +1626,7 @@ class OrderUpdate(BaseModel):
 # =========================================================
 
 class OrderStatusUpdate(BaseModel):
+    vehicle_id: Optional[str] = None
 
     status: Literal[
         "Pending",
@@ -3437,6 +3438,13 @@ def update_order_status(
         "user_id"
     )
 
+    current_vehicle_id = validate_object_id(
+        str(data["vehicle_id"]),
+        "vehicle_id"
+    ) if data.get("vehicle_id") else None
+
+    
+
     # =====================================================
     # FIND ORDER
     # =====================================================
@@ -3513,6 +3521,7 @@ def update_order_status(
         ),
     )
 
+   
     # =====================================================
     # ATOMIC STATUS + TRACKING UPDATE
     #
@@ -3521,6 +3530,21 @@ def update_order_status(
     # cannot incorrectly create duplicate
     # lifecycle events.
     # =====================================================
+
+    update_data = {
+    
+            "status":
+                data.status,
+    
+            "updated_at":
+                utc_now(),
+        }
+    
+    if current_vehicle_id is not None:
+
+        update_data[
+            "vehicle_id"
+        ] = current_vehicle_id
 
     result = orders_collection.update_one(
 
@@ -3533,14 +3557,7 @@ def update_order_status(
         },
 
         {
-            "$set": {
-
-                "status":
-                    data.status,
-
-                "updated_at":
-                    utc_now(),
-            },
+            "$set": update_data,
 
             "$push": {
 
