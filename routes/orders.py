@@ -6950,26 +6950,29 @@ def update_order(
 # =========================================================
 
 @router.post(
-    "/billing/v1/{order_no}"
+    "/billing/v1/{order_id}"
 )
 def manual_bill_order(
-
-    order_no: str,
-
+    order_id: str,
     data: ManualBillingRequest,
-
     current_user=Depends(get_current_user)
 ):
-
     # -----------------------------------------------------
     # BILLING IS ONLY FOR SALES
     # -----------------------------------------------------
-    # Purchase invoices are supplied by the vendor during
-    # purchase-order creation and must never be generated here.
+
+    try:
+        order_object_id = ObjectId(order_id)
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid order MongoDB ID"
+        )
 
     order = orders_collection.find_one({
-        "order_no": order_no
+        "_id": order_object_id
     })
+
 
     if not order:
         raise HTTPException(
@@ -6992,7 +6995,7 @@ def manual_bill_order(
     if order.get("invoice_no"):
         raise HTTPException(
             status_code=400,
-            detail=f"Order {order_no} is already billed with invoice {order['invoice_no']}"
+            detail=f"Order {order_id} is already billed with invoice {order['invoice_no']}"
         )
 
     # -----------------------------------------------------
@@ -7086,7 +7089,7 @@ def manual_bill_order(
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    f"Order {order_no} was already billed with "
+                    f"Order {order_id} was already billed with "
                     f"invoice {latest['invoice_no']}"
                 )
             )
