@@ -8,7 +8,8 @@ from database import (
     product_variants_collection,
     product_units_collection,
     packing_types_collection,
-    warehouses_collection
+    warehouses_collection,
+    vehicles_collection
 )
 
 router = APIRouter()
