@@ -909,40 +909,33 @@ def get_Unallocated_inventory(
         }
     }
 
-
 # =========================================================
-# WAREHOUSE INVENTORY
-# =========================================================
-#
-# Calculation:
-#
-# Confirmed + active + Warehouse_IN  → ADD
-# Confirmed + active + Warehouse_OUT → SUBTRACT
-#
-# Warehouse inventory =
-# Warehouse_IN - Warehouse_OUT
-#
-# Grouped by:
-# warehouse_id + product_id + variant_id
-#
-# =========================================================
-
 
 WAREHOUSE_INVENTORY_TYPES = [
     "Warehouse_IN",
     "Warehouse_OUT",
-    "Vehicle_IN",
+    "warehouse_to_vehicle",
+    "vehicle_to_warehouse",
 ]
 
 
 # =========================================================
 # GET WAREHOUSE INVENTORY
+# =========================================================
 #
-# GET /inventory/warehouse-inventory/v1
+# GET /inventory/warehouse-inventory
+#
 # =========================================================
 
-@router.get("/warehouse-inventory", tags=["Inventory"])
+@router.get(
+    "/warehouse-inventory",
+    tags=["Inventory"]
+)
 def get_warehouse_inventory(
+
+    # -----------------------------------------------------
+    # PAGINATION
+    # -----------------------------------------------------
 
     page: int = Query(
         1,
@@ -955,44 +948,63 @@ def get_warehouse_inventory(
         le=100
     ),
 
+    # -----------------------------------------------------
+    # FILTERS
+    # -----------------------------------------------------
+
     warehouse_id: Optional[str] = None,
 
     product_id: Optional[str] = None,
 
     variant_id: Optional[str] = None,
 
-    search: Optional[str] = None
+    search: Optional[str] = None,
 ):
+
+    # =====================================================
+    # PAGINATION
+    # =====================================================
 
     skip = (
         page - 1
     ) * limit
 
+
     # =====================================================
     # BASE FILTER
+    # =====================================================
+    #
+    # Only:
+    #
+    # record_status = active
+    #
+    # and supported warehouse inventory order types.
+    #
+    # Status:
+    #
+    # Warehouse_IN            -> Completed
+    # Warehouse_OUT           -> Completed
+    # warehouse_to_vehicle    -> Completed
+    # vehicle_to_warehouse    -> Completed
+    #
     # =====================================================
 
     query = {
 
         "type": {
-            "$in":
-                WAREHOUSE_INVENTORY_TYPES
+            "$in": WAREHOUSE_INVENTORY_TYPES
         },
 
-        "status":
-            "Completed",
+        "status": "Completed",
 
-        "record_status":
-            "active",
+        "record_status": "active",
 
         "warehouse_id": {
-            "$exists":
-                True,
-
-            "$ne":
-                None
+            "$exists": True,
+            "$ne": None
         }
     }
+
 
     # =====================================================
     # WAREHOUSE FILTER
@@ -1000,12 +1012,11 @@ def get_warehouse_inventory(
 
     if warehouse_id:
 
-        query[
-            "warehouse_id"
-        ] = validate_object_id(
+        query["warehouse_id"] = validate_object_id(
             warehouse_id,
             "warehouse_id"
         )
+
 
     # =====================================================
     # PRODUCT FILTER
@@ -1013,12 +1024,11 @@ def get_warehouse_inventory(
 
     if product_id:
 
-        query[
-            "items.product_id"
-        ] = validate_object_id(
+        query["items.product_id"] = validate_object_id(
             product_id,
             "product_id"
         )
+
 
     # =====================================================
     # VARIANT FILTER
@@ -1026,12 +1036,11 @@ def get_warehouse_inventory(
 
     if variant_id:
 
-        query[
-            "items.variant_id"
-        ] = validate_object_id(
+        query["items.variant_id"] = validate_object_id(
             variant_id,
             "variant_id"
         )
+
 
     # =====================================================
     # AGGREGATION
@@ -1040,26 +1049,22 @@ def get_warehouse_inventory(
     pipeline = [
 
         # -------------------------------------------------
-        # ONLY:
-        #
-        # Confirmed
-        # active
-        # Warehouse_IN / Warehouse_OUT
+        # MATCH ORDERS
         # -------------------------------------------------
 
         {
-            "$match":
-                query
+            "$match": query
         },
+
 
         # -------------------------------------------------
         # SPLIT ITEMS
         # -------------------------------------------------
 
         {
-            "$unwind":
-                "$items"
+            "$unwind": "$items"
         },
+
 
         # -------------------------------------------------
         # APPLY ITEM FILTERS
@@ -1071,13 +1076,10 @@ def get_warehouse_inventory(
                 **(
                     {
                         "items.product_id":
-                            query[
-                                "items.product_id"
-                            ]
+                            query["items.product_id"]
                     }
 
-                    if "items.product_id"
-                    in query
+                    if "items.product_id" in query
 
                     else {}
                 ),
@@ -1085,18 +1087,16 @@ def get_warehouse_inventory(
                 **(
                     {
                         "items.variant_id":
-                            query[
-                                "items.variant_id"
-                            ]
+                            query["items.variant_id"]
                     }
 
-                    if "items.variant_id"
-                    in query
+                    if "items.variant_id" in query
 
                     else {}
                 )
             }
         },
+
 
         # -------------------------------------------------
         # GROUP
@@ -1119,9 +1119,15 @@ def get_warehouse_inventory(
                         "$items.variant_id"
                 },
 
-                # -----------------------------------------
+
+                # =========================================
                 # WAREHOUSE IN
-                # -----------------------------------------
+                # =========================================
+                #
+                # Warehouse_IN
+                # -> ADD
+                #
+                # =========================================
 
                 "warehouse_in_quantity": {
 
@@ -1143,23 +1149,91 @@ def get_warehouse_inventory(
                     }
                 },
 
-                # -----------------------------------------
+
+                # =========================================
                 # WAREHOUSE OUT
-                # -----------------------------------------
+                # =========================================
+                #
+                # Warehouse_OUT
+                # -> SUBTRACT
+                #
+                # =========================================
 
                 "warehouse_out_quantity": {
+
                     "$sum": {
+
                         "$cond": [
+
                             {
-                                "$in": [
+                                "$eq": [
                                     "$type",
-                                    [
-                                        "Warehouse_OUT",
-                                        "Vehicle_IN"
-                                    ]
+                                    "Warehouse_OUT"
                                 ]
                             },
+
                             "$items.quantity",
+
+                            0
+                        ]
+                    }
+                },
+
+
+                # =========================================
+                # WAREHOUSE TO VEHICLE
+                # =========================================
+                #
+                # warehouse_to_vehicle
+                # -> SUBTRACT FROM WAREHOUSE
+                #
+                # =========================================
+
+                "warehouse_to_vehicle_quantity": {
+
+                    "$sum": {
+
+                        "$cond": [
+
+                            {
+                                "$eq": [
+                                    "$type",
+                                    "warehouse_to_vehicle"
+                                ]
+                            },
+
+                            "$items.quantity",
+
+                            0
+                        ]
+                    }
+                },
+
+
+                # =========================================
+                # VEHICLE TO WAREHOUSE
+                # =========================================
+                #
+                # vehicle_to_warehouse
+                # -> ADD TO WAREHOUSE
+                #
+                # =========================================
+
+                "vehicle_to_warehouse_quantity": {
+
+                    "$sum": {
+
+                        "$cond": [
+
+                            {
+                                "$eq": [
+                                    "$type",
+                                    "vehicle_to_warehouse"
+                                ]
+                            },
+
+                            "$items.quantity",
+
                             0
                         ]
                     }
@@ -1167,9 +1241,19 @@ def get_warehouse_inventory(
             }
         },
 
-        # -------------------------------------------------
-        # AVAILABLE QUANTITY
-        # -------------------------------------------------
+
+        # =================================================
+        # AVAILABLE WAREHOUSE QUANTITY
+        # =================================================
+        #
+        # Warehouse Inventory =
+        #
+        # Warehouse_IN
+        # + vehicle_to_warehouse
+        # - Warehouse_OUT
+        # - warehouse_to_vehicle
+        #
+        # =================================================
 
         {
             "$addFields": {
@@ -1178,17 +1262,32 @@ def get_warehouse_inventory(
 
                     "$subtract": [
 
-                        "$warehouse_in_quantity",
+                        {
+                            "$add": [
 
-                        "$warehouse_out_quantity"
+                                "$warehouse_in_quantity",
+
+                                "$vehicle_to_warehouse_quantity"
+                            ]
+                        },
+
+                        {
+                            "$add": [
+
+                                "$warehouse_out_quantity",
+
+                                "$warehouse_to_vehicle_quantity"
+                            ]
+                        }
                     ]
                 }
             }
         },
 
-        # -------------------------------------------------
+
+        # =================================================
         # SORT
-        # -------------------------------------------------
+        # =================================================
 
         {
             "$sort": {
@@ -1202,6 +1301,7 @@ def get_warehouse_inventory(
         }
     ]
 
+
     # =====================================================
     # EXECUTE AGGREGATION
     # =====================================================
@@ -1212,11 +1312,6 @@ def get_warehouse_inventory(
         )
     )
 
-    # =====================================================
-    # SEARCH
-    #
-    # Search is done after resolving master data.
-    # =====================================================
 
     # =====================================================
     # COLLECT IDS
@@ -1228,12 +1323,18 @@ def get_warehouse_inventory(
 
     variant_ids = set()
 
+
     for row in inventory_rows:
 
         row_id = row.get(
             "_id",
             {}
         )
+
+
+        # -------------------------------------------------
+        # WAREHOUSE ID
+        # -------------------------------------------------
 
         if row_id.get(
             "warehouse_id"
@@ -1245,6 +1346,11 @@ def get_warehouse_inventory(
                 ]
             )
 
+
+        # -------------------------------------------------
+        # PRODUCT ID
+        # -------------------------------------------------
+
         if row_id.get(
             "product_id"
         ):
@@ -1254,6 +1360,11 @@ def get_warehouse_inventory(
                     "product_id"
                 ]
             )
+
+
+        # -------------------------------------------------
+        # VARIANT ID
+        # -------------------------------------------------
 
         if row_id.get(
             "variant_id"
@@ -1265,25 +1376,28 @@ def get_warehouse_inventory(
                 ]
             )
 
+
     # =====================================================
     # WAREHOUSES
     # =====================================================
 
     warehouse_map = {}
 
+
     if warehouse_ids:
 
         warehouses = list(
-            warehouses_collection.find({
-
-                "_id": {
-                    "$in":
-                        list(
+            warehouses_collection.find(
+                {
+                    "_id": {
+                        "$in": list(
                             warehouse_ids
                         )
+                    }
                 }
-            })
+            )
         )
+
 
         warehouse_map = {
 
@@ -1293,25 +1407,28 @@ def get_warehouse_inventory(
             for warehouse in warehouses
         }
 
+
     # =====================================================
     # PRODUCTS
     # =====================================================
 
     product_map = {}
 
+
     if product_ids:
 
         products = list(
-            products_collection.find({
-
-                "_id": {
-                    "$in":
-                        list(
+            products_collection.find(
+                {
+                    "_id": {
+                        "$in": list(
                             product_ids
                         )
+                    }
                 }
-            })
+            )
         )
+
 
         product_map = {
 
@@ -1321,25 +1438,28 @@ def get_warehouse_inventory(
             for product in products
         }
 
+
     # =====================================================
     # VARIANTS
     # =====================================================
 
     variant_map = {}
 
+
     if variant_ids:
 
         variants = list(
-            product_variants_collection.find({
-
-                "_id": {
-                    "$in":
-                        list(
+            product_variants_collection.find(
+                {
+                    "_id": {
+                        "$in": list(
                             variant_ids
                         )
+                    }
                 }
-            })
+            )
         )
+
 
         variant_map = {
 
@@ -1349,6 +1469,7 @@ def get_warehouse_inventory(
             for variant in variants
         }
 
+
     # =====================================================
     # UNIT + PACKAGING IDS
     # =====================================================
@@ -1356,6 +1477,7 @@ def get_warehouse_inventory(
     unit_ids = set()
 
     packaging_ids = set()
+
 
     for variant in variant_map.values():
 
@@ -1367,11 +1489,13 @@ def get_warehouse_inventory(
             "packaging_type_id"
         )
 
+
         if unit_id:
 
             unit_ids.add(
                 unit_id
             )
+
 
         if packaging_type_id:
 
@@ -1379,25 +1503,28 @@ def get_warehouse_inventory(
                 packaging_type_id
             )
 
+
     # =====================================================
     # UNITS
     # =====================================================
 
     unit_map = {}
 
+
     if unit_ids:
 
         units = list(
-            product_units_collection.find({
-
-                "_id": {
-                    "$in":
-                        list(
+            product_units_collection.find(
+                {
+                    "_id": {
+                        "$in": list(
                             unit_ids
                         )
+                    }
                 }
-            })
+            )
         )
+
 
         unit_map = {
 
@@ -1407,25 +1534,28 @@ def get_warehouse_inventory(
             for unit in units
         }
 
+
     # =====================================================
-    # PACKAGING
+    # PACKAGING TYPES
     # =====================================================
 
     packaging_map = {}
 
+
     if packaging_ids:
 
         packaging_types = list(
-            packing_types_collection.find({
-
-                "_id": {
-                    "$in":
-                        list(
+            packing_types_collection.find(
+                {
+                    "_id": {
+                        "$in": list(
                             packaging_ids
                         )
+                    }
                 }
-            })
+            )
         )
+
 
         packaging_map = {
 
@@ -1435,11 +1565,13 @@ def get_warehouse_inventory(
             for packaging in packaging_types
         }
 
+
     # =====================================================
     # BUILD RESPONSE
     # =====================================================
 
     data = []
+
 
     for row in inventory_rows:
 
@@ -1448,11 +1580,13 @@ def get_warehouse_inventory(
             {}
         )
 
+
         warehouse_id_value = (
             row_id.get(
                 "warehouse_id"
             )
         )
+
 
         product_id_value = (
             row_id.get(
@@ -1460,26 +1594,35 @@ def get_warehouse_inventory(
             )
         )
 
+
         variant_id_value = (
             row_id.get(
                 "variant_id"
             )
         )
 
+
+        # -------------------------------------------------
+        # MASTER DATA
+        # -------------------------------------------------
+
         warehouse = warehouse_map.get(
             warehouse_id_value,
             {}
         )
+
 
         product = product_map.get(
             product_id_value,
             {}
         )
 
+
         variant = variant_map.get(
             variant_id_value,
             {}
         )
+
 
         # =================================================
         # UNIT
@@ -1487,9 +1630,11 @@ def get_warehouse_inventory(
 
         unit = ""
 
+
         unit_id = variant.get(
             "unit_id"
         )
+
 
         if unit_id:
 
@@ -1498,6 +1643,7 @@ def get_warehouse_inventory(
                 {}
             )
 
+
             unit = (
                 unit_data.get(
                     "symbol"
@@ -1505,17 +1651,20 @@ def get_warehouse_inventory(
                 or ""
             )
 
+
         # =================================================
         # PACKAGE
         # =================================================
 
         package = ""
 
+
         packaging_type_id = (
             variant.get(
                 "packaging_type_id"
             )
         )
+
 
         if packaging_type_id:
 
@@ -1526,6 +1675,7 @@ def get_warehouse_inventory(
                 )
             )
 
+
             package = (
                 package_data.get(
                     "name"
@@ -1533,82 +1683,151 @@ def get_warehouse_inventory(
                 or ""
             )
 
+
         # =================================================
         # RESPONSE
         # =================================================
 
         data.append({
 
+            # ------------------------------------------------
+            # WAREHOUSE
+            # ------------------------------------------------
+
             "warehouse_id":
+
                 str(
                     warehouse_id_value
                 )
                 if warehouse_id_value
                 else None,
 
+
             "warehouse_name":
+
                 warehouse.get(
                     "name"
                 ),
 
+
+            # ------------------------------------------------
+            # PRODUCT
+            # ------------------------------------------------
+
             "product_id":
+
                 str(
                     product_id_value
                 )
                 if product_id_value
                 else None,
 
+
             "product_name":
+
                 product.get(
                     "name"
                 ),
 
+
+            # ------------------------------------------------
+            # VARIANT
+            # ------------------------------------------------
+
             "variant_id":
+
                 str(
                     variant_id_value
                 )
                 if variant_id_value
                 else None,
 
+
             "variant_name":
+
                 variant.get(
                     "name"
                 ),
 
+
             "variant_qty":
-                        variant.get(
-                            "quantity"
-                        ),
+
+                variant.get(
+                    "quantity"
+                ),
+
 
             "sku":
+
                 variant.get(
                     "sku"
                 ),
 
+
+            # ------------------------------------------------
+            # UNIT
+            # ------------------------------------------------
+
             "unit":
                 unit,
+
+
+            # ------------------------------------------------
+            # PACKAGING
+            # ------------------------------------------------
 
             "package":
                 package,
 
+
+            # =================================================
+            # STOCK MOVEMENTS
+            # =================================================
+
             "warehouse_in_quantity":
+
                 row.get(
                     "warehouse_in_quantity",
                     0
                 ),
 
+
             "warehouse_out_quantity":
+
                 row.get(
                     "warehouse_out_quantity",
                     0
                 ),
 
+
+            "warehouse_to_vehicle_quantity":
+
+                row.get(
+                    "warehouse_to_vehicle_quantity",
+                    0
+                ),
+
+
+            "vehicle_to_warehouse_quantity":
+
+                row.get(
+                    "vehicle_to_warehouse_quantity",
+                    0
+                ),
+
+
+            # =================================================
+            # AVAILABLE WAREHOUSE STOCK
+            # =================================================
+
             "available_quantity":
+
                 row.get(
                     "available_quantity",
                     0
                 )
         })
+
 
     # =====================================================
     # SEARCH
@@ -1620,6 +1839,7 @@ def get_warehouse_inventory(
             search.strip().lower()
         )
 
+
         data = [
 
             item
@@ -1627,6 +1847,10 @@ def get_warehouse_inventory(
             for item in data
 
             if (
+
+                # -----------------------------------------
+                # WAREHOUSE NAME
+                # -----------------------------------------
 
                 search_lower
                 in str(
@@ -1636,7 +1860,13 @@ def get_warehouse_inventory(
                     or ""
                 ).lower()
 
+
                 or
+
+
+                # -----------------------------------------
+                # PRODUCT NAME
+                # -----------------------------------------
 
                 search_lower
                 in str(
@@ -1646,7 +1876,13 @@ def get_warehouse_inventory(
                     or ""
                 ).lower()
 
+
                 or
+
+
+                # -----------------------------------------
+                # VARIANT NAME
+                # -----------------------------------------
 
                 search_lower
                 in str(
@@ -1656,7 +1892,13 @@ def get_warehouse_inventory(
                     or ""
                 ).lower()
 
+
                 or
+
+
+                # -----------------------------------------
+                # SKU
+                # -----------------------------------------
 
                 search_lower
                 in str(
@@ -1668,11 +1910,15 @@ def get_warehouse_inventory(
             )
         ]
 
+
     # =====================================================
     # PAGINATION
     # =====================================================
 
-    total = len(data)
+    total = len(
+        data
+    )
+
 
     total_pages = (
 
@@ -1684,10 +1930,12 @@ def get_warehouse_inventory(
         // limit
     )
 
+
     data = data[
         skip:
         skip + limit
     ]
+
 
     # =====================================================
     # RESPONSE
@@ -1716,7 +1964,6 @@ def get_warehouse_inventory(
                 total_pages
         }
     }
-
 
 # =========================================================
 # MAIN INVENTORY TYPES
