@@ -24,3 +24,41 @@ vehicles_collection = db["vehicles"]
 vendors_collection = db["vendors"]
 orders_collection = db["orders"]
 counters_collection = db["counter"]
+whatsapp_chats_collection = db["whatsapp_chats"]
+whatsapp_messages_collection = db["whatsapp_messages"]
+
+
+
+
+# =========================================================
+# WHATSAPP INDEXES
+# =========================================================
+
+# One chat per WhatsApp phone number
+whatsapp_chats_collection.create_index(
+    [("phone", 1)],
+    unique=True
+)
+
+
+# Latest chats first
+whatsapp_chats_collection.create_index(
+    [("last_message_at", -1)]
+)
+
+
+# Fast message loading for a chat
+whatsapp_messages_collection.create_index(
+    [
+        ("chat_id", 1),
+        ("timestamp", 1)
+    ]
+)
+
+
+# WhatsApp message ID should be unique
+whatsapp_messages_collection.create_index(
+    [("message_id", 1)],
+    unique=True,
+    sparse=True
+)

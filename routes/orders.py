@@ -4504,7 +4504,7 @@ def manual_bill_order(
 
 
 # =========================================================
-# GET /orders/billing/v1/{order_id}/pdf
+# GET /orders/get-bill/v1/{order_id}/pdf
 #
 # View / Download invoice from frontend
 #
@@ -4512,7 +4512,7 @@ def manual_bill_order(
 # =========================================================
 
 @router.get(
-    "/billing/v1/{order_id}/pdf",
+    "/get-bill/v1/{order_id}/pdf",
     response_class=StreamingResponse,
     responses={
         200: {
@@ -4673,7 +4673,7 @@ def get_bill_pdf(
 # =========================================================
 # RESEND BILL ON WHATSAPP
 #
-# POST /orders/billing/v1/{order_id}/whatsapp
+# POST /orders/resend-bill/v1/{order_id}/whatsapp
 #
 # Used when user manually wants to send/resend invoice.
 #
@@ -4682,7 +4682,7 @@ def get_bill_pdf(
 # =========================================================
 
 @router.post(
-    "/billing/v1/{order_id}/whatsapp"
+    "/resend-bill/v1/{order_id}/whatsapp"
 )
 def resend_bill_whatsapp(
     order_id: str,
