@@ -1398,6 +1398,8 @@ class OrderCreate(BaseModel):
         "Warehouse_OUT",
         "Vehicle_IN",
         "Vehicle_OUT",
+        "warehouse_to_vehicle",
+        "vehicle_to_warehouse",
     ]
 
     vendor_id: Optional[str] = None
