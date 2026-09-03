@@ -8,11 +8,14 @@ cffi==2.1.1
 charset-normalizer==3.5.1
 click==8.4.2
 dnspython==2.8.0
+docopt==0.6.2
 email-validator==2.3.0
 fastapi==0.141.1
 h11==0.16.0
 httptools==0.8.0
 idna==3.18
+num2words==0.5.14
+pillow==12.3.0
 pwdlib==0.3.0
 pycparser==3.0
 pydantic==2.13.4
@@ -22,6 +25,7 @@ pymongo==4.17.0
 python-dotenv==1.2.2
 python-multipart==0.0.32
 PyYAML==6.0.3
+reportlab==5.0.1
 requests==2.34.2
 starlette==1.6.0
 typing-inspection==0.4.3
