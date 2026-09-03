@@ -294,3 +294,4 @@ def verify_customer_otp(
             "phone_verified_at": now
         }
     }
+
