@@ -49,7 +49,9 @@ ORDER_TYPES = [
     "Warehouse_IN",
     "Warehouse_OUT",
     "Vehicle_IN",
-    "Vehicle_OUT",
+    "warehouse_to_vehicle",
+    "vehicle_to_warehouse",
+    
 ]
 
 ORDER_STATUSES = [
@@ -88,6 +90,8 @@ ORDER_INVOICE_PREFIX = {
     "Warehouse_OUT": "WOUT",
     "Vehicle_IN": "VIN",
     "Vehicle_OUT": "VOUT",
+    "warehouse_to_vehicle": "WTV",
+    "vehicle_to_warehouse": "VTW"
 }
 
 
