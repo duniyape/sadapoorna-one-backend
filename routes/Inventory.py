@@ -3341,11 +3341,30 @@ def get_unblocked_stock(
         }
     }
 # =========================================================
-# CONSTANTS
+# VEHICLE INVENTORY
+# =========================================================
+#
+# Calculation:
+#
+# warehouse_to_vehicle + Completed -> ADD
+# sale + Delivered                -> SUBTRACT
+#
+# Only:
+# record_status = active
+#
+# Vehicle Inventory =
+# Completed warehouse_to_vehicle
+# -
+# Delivered sale
+#
+# Grouped by:
+# vehicle_id + product_id + variant_id
+#
 # =========================================================
 
+
 VEHICLE_INVENTORY_TYPES = [
-    "Vehicle_IN",
+    "warehouse_to_vehicle",
     "sale"
 ]
 
@@ -3391,7 +3410,7 @@ def get_vehicle_inventory(
     # BASE QUERY
     # =====================================================
     #
-    # Vehicle_IN:
+    # warehouse_to_vehicle:
     #     status = Completed
     #
     # sale:
@@ -3400,37 +3419,29 @@ def get_vehicle_inventory(
     # Both:
     #     record_status = active
     #
+    # Only transactions having vehicle_id are considered.
+    #
     # =====================================================
 
     query = {
 
-        "record_status":
-            "active",
+        "record_status": "active",
 
         "vehicle_id": {
-            "$exists":
-                True,
-
-            "$ne":
-                None
+            "$exists": True,
+            "$ne": None
         },
 
         "$or": [
 
             {
-                "type":
-                    "Vehicle_IN",
-
-                "status":
-                    "Completed"
+                "type": "warehouse_to_vehicle",
+                "status": "Completed"
             },
 
             {
-                "type":
-                    "sale",
-
-                "status":
-                    "Delivered"
+                "type": "sale",
+                "status": "Delivered"
             }
         ]
     }
@@ -3485,12 +3496,11 @@ def get_vehicle_inventory(
     pipeline = [
 
         # -------------------------------------------------
-        # FILTER VALID VEHICLE TRANSACTIONS
+        # FILTER TRANSACTIONS
         # -------------------------------------------------
 
         {
-            "$match":
-                query
+            "$match": query
         },
 
 
@@ -3499,8 +3509,7 @@ def get_vehicle_inventory(
         # -------------------------------------------------
 
         {
-            "$unwind":
-                "$items"
+            "$unwind": "$items"
         },
 
 
@@ -3520,8 +3529,7 @@ def get_vehicle_inventory(
                             ]
                     }
 
-                    if "items.product_id"
-                    in query
+                    if "items.product_id" in query
 
                     else {}
                 ),
@@ -3535,8 +3543,7 @@ def get_vehicle_inventory(
                             ]
                     }
 
-                    if "items.variant_id"
-                    in query
+                    if "items.variant_id" in query
 
                     else {}
                 )
@@ -3567,12 +3574,12 @@ def get_vehicle_inventory(
 
 
                 # -----------------------------------------
-                # VEHICLE IN
+                # WAREHOUSE TO VEHICLE
                 #
-                # Vehicle_IN + Completed
+                # warehouse_to_vehicle + Completed
                 # -----------------------------------------
 
-                "vehicle_in_quantity": {
+                "warehouse_to_vehicle_quantity": {
 
                     "$sum": {
 
@@ -3581,7 +3588,7 @@ def get_vehicle_inventory(
                             {
                                 "$eq": [
                                     "$type",
-                                    "Vehicle_IN"
+                                    "warehouse_to_vehicle"
                                 ]
                             },
 
@@ -3594,7 +3601,7 @@ def get_vehicle_inventory(
 
 
                 # -----------------------------------------
-                # SALE
+                # SALES
                 #
                 # sale + Delivered
                 # -----------------------------------------
@@ -3625,7 +3632,7 @@ def get_vehicle_inventory(
         # -------------------------------------------------
         # CALCULATE AVAILABLE VEHICLE INVENTORY
         #
-        # Vehicle_IN - Delivered Sale
+        # warehouse_to_vehicle - sale
         # -------------------------------------------------
 
         {
@@ -3635,7 +3642,7 @@ def get_vehicle_inventory(
 
                     "$subtract": [
 
-                        "$vehicle_in_quantity",
+                        "$warehouse_to_vehicle_quantity",
 
                         "$sale_quantity"
                     ]
@@ -3651,14 +3658,11 @@ def get_vehicle_inventory(
         {
             "$sort": {
 
-                "_id.vehicle_id":
-                    1,
+                "_id.vehicle_id": 1,
 
-                "_id.product_id":
-                    1,
+                "_id.product_id": 1,
 
-                "_id.variant_id":
-                    1
+                "_id.variant_id": 1
             }
         }
     ]
@@ -3694,48 +3698,24 @@ def get_vehicle_inventory(
         )
 
 
-        # -----------------------------------------------
-        # VEHICLE ID
-        # -----------------------------------------------
-
-        if row_id.get(
-            "vehicle_id"
-        ):
+        if row_id.get("vehicle_id"):
 
             vehicle_ids.add(
-                row_id[
-                    "vehicle_id"
-                ]
+                row_id["vehicle_id"]
             )
 
 
-        # -----------------------------------------------
-        # PRODUCT ID
-        # -----------------------------------------------
-
-        if row_id.get(
-            "product_id"
-        ):
+        if row_id.get("product_id"):
 
             product_ids.add(
-                row_id[
-                    "product_id"
-                ]
+                row_id["product_id"]
             )
 
 
-        # -----------------------------------------------
-        # VARIANT ID
-        # -----------------------------------------------
-
-        if row_id.get(
-            "variant_id"
-        ):
+        if row_id.get("variant_id"):
 
             variant_ids.add(
-                row_id[
-                    "variant_id"
-                ]
+                row_id["variant_id"]
             )
 
 
@@ -3752,10 +3732,7 @@ def get_vehicle_inventory(
             vehicles_collection.find({
 
                 "_id": {
-                    "$in":
-                        list(
-                            vehicle_ids
-                        )
+                    "$in": list(vehicle_ids)
                 }
             })
         )
@@ -3783,10 +3760,7 @@ def get_vehicle_inventory(
             products_collection.find({
 
                 "_id": {
-                    "$in":
-                        list(
-                            product_ids
-                        )
+                    "$in": list(product_ids)
                 }
             })
         )
@@ -3814,10 +3788,7 @@ def get_vehicle_inventory(
             product_variants_collection.find({
 
                 "_id": {
-                    "$in":
-                        list(
-                            variant_ids
-                        )
+                    "$in": list(variant_ids)
                 }
             })
         )
@@ -3879,10 +3850,7 @@ def get_vehicle_inventory(
             product_units_collection.find({
 
                 "_id": {
-                    "$in":
-                        list(
-                            unit_ids
-                        )
+                    "$in": list(unit_ids)
                 }
             })
         )
@@ -3910,10 +3878,7 @@ def get_vehicle_inventory(
             packing_types_collection.find({
 
                 "_id": {
-                    "$in":
-                        list(
-                            packaging_ids
-                        )
+                    "$in": list(packaging_ids)
                 }
             })
         )
@@ -3955,10 +3920,6 @@ def get_vehicle_inventory(
             "variant_id"
         )
 
-
-        # =================================================
-        # GET MASTER DATA
-        # =================================================
 
         vehicle = vehicle_map.get(
             vehicle_id_value,
@@ -4045,18 +4006,15 @@ def get_vehicle_inventory(
                 if vehicle_id_value
                 else None,
 
-
             "vehicle_number":
                 vehicle.get(
                     "vehicle_number"
                 ),
 
-
             "model":
                 vehicle.get(
                     "model"
                 ),
-
 
             "vehicle_type":
                 vehicle.get(
@@ -4071,17 +4029,9 @@ def get_vehicle_inventory(
 
         data.append({
 
-            # ---------------------------------------------
-            # VEHICLE
-            # ---------------------------------------------
-
             "vehicle":
                 vehicle_data,
 
-
-            # ---------------------------------------------
-            # PRODUCT
-            # ---------------------------------------------
 
             "product_id":
                 str(
@@ -4096,10 +4046,6 @@ def get_vehicle_inventory(
                     "name"
                 ),
 
-
-            # ---------------------------------------------
-            # VARIANT
-            # ---------------------------------------------
 
             "variant_id":
                 str(
@@ -4127,29 +4073,21 @@ def get_vehicle_inventory(
                 ),
 
 
-            # ---------------------------------------------
-            # UNIT
-            # ---------------------------------------------
-
             "unit":
                 unit,
 
-
-            # ---------------------------------------------
-            # PACKAGING
-            # ---------------------------------------------
 
             "package":
                 package,
 
 
             # ---------------------------------------------
-            # INVENTORY
+            # STOCK MOVEMENT
             # ---------------------------------------------
 
-            "vehicle_in_quantity":
+            "warehouse_to_vehicle_quantity":
                 row.get(
-                    "vehicle_in_quantity",
+                    "warehouse_to_vehicle_quantity",
                     0
                 ),
 
@@ -4160,6 +4098,10 @@ def get_vehicle_inventory(
                     0
                 ),
 
+
+            # ---------------------------------------------
+            # CURRENT VEHICLE STOCK
+            # ---------------------------------------------
 
             "available_quantity":
                 row.get(
@@ -4188,10 +4130,6 @@ def get_vehicle_inventory(
 
             if (
 
-                # -----------------------------------------
-                # VEHICLE NUMBER
-                # -----------------------------------------
-
                 search_lower
                 in str(
                     item.get(
@@ -4206,10 +4144,6 @@ def get_vehicle_inventory(
 
                 or
 
-
-                # -----------------------------------------
-                # VEHICLE MODEL
-                # -----------------------------------------
 
                 search_lower
                 in str(
@@ -4226,10 +4160,6 @@ def get_vehicle_inventory(
                 or
 
 
-                # -----------------------------------------
-                # VEHICLE TYPE
-                # -----------------------------------------
-
                 search_lower
                 in str(
                     item.get(
@@ -4245,10 +4175,6 @@ def get_vehicle_inventory(
                 or
 
 
-                # -----------------------------------------
-                # PRODUCT NAME
-                # -----------------------------------------
-
                 search_lower
                 in str(
                     item.get(
@@ -4261,10 +4187,6 @@ def get_vehicle_inventory(
                 or
 
 
-                # -----------------------------------------
-                # VARIANT NAME
-                # -----------------------------------------
-
                 search_lower
                 in str(
                     item.get(
@@ -4276,10 +4198,6 @@ def get_vehicle_inventory(
 
                 or
 
-
-                # -----------------------------------------
-                # SKU
-                # -----------------------------------------
 
                 search_lower
                 in str(
@@ -4308,12 +4226,10 @@ def get_vehicle_inventory(
             )
             or "",
 
-
             x.get(
                 "product_name"
             )
             or "",
-
 
             x.get(
                 "variant_name"
