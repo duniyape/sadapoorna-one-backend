@@ -1415,6 +1415,8 @@ class OrderCreate(BaseModel):
     # For sales, invoice_no is generated during manual billing.
     invoice_no: Optional[str] = None
 
+    ref_invoice_id: Optional[str] = None
+
     payment_mode: Optional[str] = None
 
     branch_id: Optional[str] = None
@@ -2294,6 +2296,14 @@ def create_order(
         "user_id"
     )
 
+    ref_invoice_id = None
+
+    if data.ref_invoice_id:
+        ref_invoice_id = validate_object_id(
+            data.ref_invoice_id,
+            "ref_invoice_id"
+        )
+
     # =====================================================
     # BUILD ITEMS
     # =====================================================
@@ -2360,6 +2370,8 @@ def create_order(
 
         "vehicle_id":
             vehicle_object_id,
+
+        "ref_invoice_id": ref_invoice_id,
 
         "payment_mode":
             data.payment_mode,
@@ -3300,298 +3312,6 @@ def _build_gst_rows(order):
     return rows
 
 
-
-# def generate_invoice_pdf(order):
-#     """Generate the invoice PDF in memory and return PDF bytes."""
-
-#     customer = order.get("customer") or {}
-#     supplier_gst = os.getenv("SUPPLIER_GSTIN", "")
-#     supplier_state = os.getenv("SUPPLIER_STATE", "Madhya Pradesh")
-#     supplier_code = os.getenv("SUPPLIER_STATE_CODE", "23")
-
-#     customer_name = (
-#         customer.get("shop")
-#         or customer.get("owner")
-#         or customer.get("name")
-#         or "Walk-in Customer"
-#     )
-#     customer_address = _pdf_customer_address(customer)
-#     customer_gst = customer.get("gst_number") or customer.get("gstin") or ""
-#     customer_state, customer_state_code = _pdf_customer_state(customer)
-
-#     # If customer state is not explicitly stored, try to infer it from the address text.
-#     if not customer_state:
-#         customer_state = ""
-
-#     is_inter_state = bool(
-#         customer_state_code
-#         and supplier_code
-#         and str(customer_state_code) != str(supplier_code)
-#     )
-
-#     invoice_no = order.get("invoice_no") or "NA"
-#     invoice_date = order.get("billed_at") or order.get("created_at")
-#     if isinstance(invoice_date, datetime):
-#         invoice_date = invoice_date.astimezone(timezone.utc).astimezone(IST).strftime("%d-%m-%Y")
-#     else:
-#         invoice_date = str(invoice_date or "")
-
-#     subtotal = _pdf_money(order.get("subtotal"))
-#     total_gst = _pdf_money(order.get("total_gst"))
-#     other_charges = _pdf_money(order.get("other_charges"))
-#     discount = _pdf_money(order.get("discount"))
-#     previous_balance = _pdf_money(
-#         order.get("previous_balance", order.get("previousBalance", 0))
-#     )
-#     gross_bill = round(subtotal + total_gst + other_charges, 2)
-#     bill_amount = _pdf_money(order.get("grand_total", gross_bill - discount))
-#     total_due = round(bill_amount + previous_balance, 2)
-#     words = num2words(int(round(total_due)), lang="en_IN").title()
-
-#     buffer = io.BytesIO()
-#     c = canvas.Canvas(buffer, pagesize=A4)
-#     width, height = A4
-#     margin = 40
-
-#     # -----------------------------------------------------
-#     # HEADER & SUPPLIER
-#     # -----------------------------------------------------
-#     c.setFont("Helvetica-Bold", 14)
-#     c.drawString(margin, height - 50, "SADAPOORNA TRADERS")
-#     c.setFont("Helvetica", 8)
-#     c.setFillGray(0.3)
-#     c.drawString(margin, height - 62, "LIG B-301, E-7, Arera Colony, Bhopal (MP) 462016")
-#     c.drawString(
-#         margin,
-#         height - 72,
-#         f"GSTIN: {supplier_gst} | State: {supplier_state} ({supplier_code})"
-#     )
-
-#     logo_path = os.getenv("INVOICE_LOGO_PATH", "logo.png")
-#     if os.path.exists(logo_path):
-#         c.drawImage(
-#             logo_path,
-#             width - margin - 100,
-#             height - 65,
-#             width=80,
-#             height=50,
-#             preserveAspectRatio=True,
-#             mask="auto",
-#         )
-
-#     c.drawRightString(width - margin, height - 62, "Mob: 9977233055, 7553524977")
-#     c.line(margin, height - 80, width - margin, height - 80)
-
-#     # -----------------------------------------------------
-#     # CUSTOMER / PLACE OF SUPPLY
-#     # -----------------------------------------------------
-#     y_meta = height - 105
-#     c.setFillGray(0)
-#     c.setFont("Helvetica-Bold", 9)
-#     c.drawString(margin, y_meta, "BILL TO / PLACE OF SUPPLY:")
-#     c.setFont("Helvetica", 9)
-#     c.drawString(margin, y_meta - 12, customer_name)
-#     c.setFont("Helvetica", 8)
-#     c.drawString(margin, y_meta - 22, customer_address[:90])
-#     c.drawString(margin, y_meta - 32, f"GSTIN: {customer_gst}")
-#     c.drawString(margin, y_meta - 42, f"State: {customer_state}")
-
-#     c.drawRightString(width - margin, y_meta, f"Invoice No: #{invoice_no}")
-#     c.drawRightString(width - margin, y_meta - 12, f"Date: {invoice_date}")
-
-#     # -----------------------------------------------------
-#     # ITEMS TABLE
-#     # -----------------------------------------------------
-#     y_table = y_meta - 65
-#     table_rows = [["#", "Description", "HSN", "units", "Qty", "Rate", "Amount"]]
-
-#     for i, item in enumerate(order.get("items", []) or [], 1):
-#         product_name = item.get("product_name") or item.get("product", {}).get("name") if isinstance(item.get("product"), dict) else None
-#         variant_name = item.get("variant_name") or item.get("variant", {}).get("name") if isinstance(item.get("variant"), dict) else None
-#         description = product_name or variant_name or item.get("description") or "na"
-#         if product_name and variant_name and variant_name != product_name:
-#             description = f"{product_name} - {variant_name}"
-
-#         # Safely extract unit whether it's stored as a dictionary or a string
-#         raw_unit = item.get("billingUnit") or item.get("unit") or item.get("unit_name") or ""
-#         if isinstance(raw_unit, dict):
-#             unit = raw_unit.get("symbol") or raw_unit.get("name") or ""
-#         else:
-#             unit = str(raw_unit)
-
-#         billing_qty = item.get("billingQty", item.get("quantity", 0))
-#         qty = item.get("quantity", 0)
-#         rate = _pdf_money(item.get("rate"))
-#         amount = _pdf_money(item.get("total_amount", item.get("amount", item.get("taxable_amount", 0))))
-#         hsn = item.get("hsn") or item.get("hsn_code") or "-"
-        
-#         weight_type = item.get("weightagetype") or item.get("weightage_type") or unit or ""
-#         rate_unit = item.get("rateUnit") or unit or "unit"
-
-#         table_rows.append([
-#             i,
-#             str(description),
-#             str(hsn),
-#             f"{billing_qty} {unit}".strip(),
-#             f"{qty} {weight_type}".strip(),
-#             f"{rate:.2f}/- per {rate_unit}",
-#             f"{amount:.2f}",
-#         ])
-
-#     table_rows.append(["", "", "", "", "", "Total:", f"{gross_bill:.2f}"])
-
-#     table = Table(
-#         table_rows,
-#         colWidths=[20, 170, 60, 55, 60, 60, 90]
-#     )
-#     table.setStyle(TableStyle([
-#         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-#         ("FONTSIZE", (0, 0), (-1, -1), 8),
-#         ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
-#         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#333333")),
-#         ("ALIGN", (3, 0), (-1, -1), "RIGHT"),
-#         ("GRID", (0, 0), (-1, -1), 0.1, colors.lightgrey),
-#         ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-#     ]))
-#     tw, th = table.wrapOn(c, width, height)
-#     table.drawOn(c, margin, y_table - th)
-
-#     # -----------------------------------------------------
-#     # GST SUMMARY
-#     # -----------------------------------------------------
-#     y_gst = y_table - th - 25
-#     c.setFont("Helvetica-Bold", 8)
-#     c.drawString(margin, y_gst, "GST TAX SUMMARY")
-
-#     gst_rows = _build_gst_rows(order)
-#     gst_table_rows = []
-#     if is_inter_state:
-#         gst_table_rows.append(["Tax Rate", "Taxable Value", "IGST", "Total Tax"])
-#         for row in gst_rows:
-#             gst_table_rows.append([
-#                 f"{row['rate']:.2f}%",
-#                 f"{row['taxable']:.2f}",
-#                 f"{row['gst']:.2f}",
-#                 f"{row['gst']:.2f}",
-#             ])
-#         if not gst_rows:
-#             gst_table_rows.append(["0%", f"{subtotal:.2f}", "0.00", "0.00"])
-#         col_w = [100, 110, 100, 110]
-#     else:
-#         gst_table_rows.append(["Tax Rate", "Taxable Value", "CGST", "SGST", "Total Tax"])
-#         for row in gst_rows:
-#             half = round(row["gst"] / 2, 2)
-#             gst_table_rows.append([
-#                 f"{row['rate']:.2f}%",
-#                 f"{row['taxable']:.2f}",
-#                 f"{half:.2f}",
-#                 f"{half:.2f}",
-#                 f"{row['gst']:.2f}",
-#             ])
-#         if not gst_rows:
-#             gst_table_rows.append(["0%", f"{subtotal:.2f}", "0.00", "0.00", "0.00"])
-#         col_w = [70, 95, 75, 75, 105]
-
-#     gst_table = Table(gst_table_rows, colWidths=col_w)
-#     gst_table.setStyle(TableStyle([
-#         ("FONTSIZE", (0, 0), (-1, -1), 7.5),
-#         ("GRID", (0, 0), (-1, -1), 0.1, colors.grey),
-#         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-#         ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
-#     ]))
-#     gw, gh = gst_table.wrapOn(c, width, height)
-#     gst_table.drawOn(c, margin, y_gst - gh - 5)
-
-#     # -----------------------------------------------------
-#     # TOTALS & BALANCE
-#     # -----------------------------------------------------
-#     y_fin = y_gst - gh - 35
-#     c.setFont("Helvetica", 9)
-#     c.drawRightString(width - 140, y_fin, "Current Bill Amount:")
-#     c.drawRightString(width - margin, y_fin, f"₹{gross_bill:.2f}")
-
-#     offset = 0
-#     if discount > 0:
-#         offset += 15
-#         c.setFillGray(0.4)
-#         c.drawRightString(width - 140, y_fin - offset, "Discount (-):")
-#         c.drawRightString(width - margin, y_fin - offset, f"₹{discount:.2f}")
-#         c.setFillGray(0)
-
-#     offset += 15
-#     if other_charges > 0:
-#         c.drawRightString(width - 140, y_fin - offset, "Other Charges (+):")
-#         c.drawRightString(width - margin, y_fin - offset, f"₹{other_charges:.2f}")
-#         offset += 15
-
-#     c.drawRightString(width - 140, y_fin - offset, "Previous Balance:")
-#     c.drawRightString(width - margin, y_fin - offset, f"₹{previous_balance:.2f}")
-#     c.line(width - 160, y_fin - offset - 7, width - margin, y_fin - offset - 7)
-
-#     offset += 20
-#     c.setFont("Helvetica-Bold", 11)
-#     c.drawRightString(width - 140, y_fin - offset, "Total Balance Due:")
-#     c.drawRightString(width - margin, y_fin - offset, f"₹{total_due:.2f}")
-#     c.setFont("Helvetica-Oblique", 8)
-#     c.drawString(margin, y_fin - offset, f"Amount in words: INR {words} Only")
-
-#     # -----------------------------------------------------
-#     # BANK DETAILS
-#     # -----------------------------------------------------
-#     y_bank = y_fin - offset - 45
-#     c.setFont("Helvetica-Bold", 10)
-#     c.drawString(margin, y_bank, "Bank Details:")
-#     c.setFont("Helvetica", 8)
-#     c.drawString(
-#         margin,
-#         y_bank - 10,
-#         "Indian Overseas Bank | Arera Colony, Bhopal | A/C: 372802000000555 | IFSC: IOBA0003728"
-#     )
-
-#     # -----------------------------------------------------
-#     # TERMS & SIGNATURE
-#     # -----------------------------------------------------
-#     y_terms = y_bank - 40
-#     c.setFont("Helvetica-Bold", 10)
-#     c.drawString(margin, y_terms, "Terms & Conditions:")
-#     c.setFont("Helvetica", 8)
-#     terms = [
-#         "1. Not responsible after goods despatched.",
-#         "2. Interest @24% P.A. after 7 days.",
-#         "3. Payment on demand.",
-#         "4. (L) is for Loose Packing.",
-#     ]
-#     for i, line in enumerate(terms):
-#         c.drawString(margin, y_terms - 10 - (i * 9), line)
-
-#     sign_path = os.getenv("INVOICE_SIGN_PATH", "sign.png")
-#     if os.path.exists(sign_path):
-#         c.drawImage(
-#             sign_path,
-#             width - margin - 80,
-#             margin + 40,
-#             width=80,
-#             height=50,
-#             preserveAspectRatio=True,
-#             mask="auto",
-#         )
-#     c.drawRightString(width - margin, margin + 35, "For SADAPOORNA TRADERS")
-#     c.setFont("Helvetica", 7)
-#     c.drawRightString(width - margin, margin + 25, "Authorized Signatory")
-
-#     c.line(margin, margin + 15, width - margin, margin + 15)
-#     c.setFont("Helvetica-Oblique", 6.5)
-#     c.setFillGray(0.4)
-#     c.drawCentredString(
-#         width / 2,
-#         margin + 5,
-#         "* This is a computer-generated Bill and managed by Duniyape Technologies"
-#     )
-
-#     c.showPage()
-#     c.save()
-#     buffer.seek(0)
-#     return buffer.getvalue()
 
 # Define IST timezone helper
 IST = timezone(timedelta(hours=5, minutes=30))

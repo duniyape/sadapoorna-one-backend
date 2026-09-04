@@ -26,7 +26,7 @@ orders_collection = db["orders"]
 counters_collection = db["counter"]
 whatsapp_chats_collection = db["whatsapp_chats"]
 whatsapp_messages_collection = db["whatsapp_messages"]
-
+beats_collection = db["beats"]
 
 
 

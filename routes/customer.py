@@ -177,6 +177,8 @@ class CustomerCreate(BaseModel):
     business_type: Optional[str] = None
 
     gst_number: Optional[str] = None
+    
+    beat_id: Optional[str] = None
 
     # -----------------------------------
     # Assignment
@@ -451,6 +453,12 @@ def create_customer(
             else None
         ),
 
+        "beat_id": (
+            customer.beat_id.strip()
+            if customer.beat_id
+            else None
+        ),
+
         # -----------------------------------
         # Address
         # -----------------------------------
@@ -582,6 +590,10 @@ def create_customer(
 
             "gst_number": (
                 customer.gst_number
+            ),
+
+            "beat_id": (
+                customer.beat_id
             ),
 
             "billing_address": (
@@ -858,6 +870,10 @@ def get_customers(
                 "gst_number"
             ),
 
+            "beat_id": customer.get(
+                "beat_id"
+            ),
+
             "billing_address": customer.get(
                 "billing_address"
             ),
@@ -1049,6 +1065,12 @@ def get_customer(
             "gst_number": (
                 customer.get(
                     "gst_number"
+                )
+            ),
+
+            "beat_id": (
+                customer.get(
+                    "beat_id"
                 )
             ),
 
@@ -1346,6 +1368,12 @@ def update_customer(
             else None
         ),
 
+        "beat_id": (
+            customer.beat_id.strip()
+            if customer.beat_id
+            else None
+        ),
+
         # -----------------------------------
         # Address
         # -----------------------------------
@@ -1480,6 +1508,12 @@ def update_customer(
             "gst_number": (
                 updated_customer.get(
                     "gst_number"
+                )
+            ),
+
+            "beat_id": (
+                updated_customer.get(
+                    "beat_id"
                 )
             ),
 
