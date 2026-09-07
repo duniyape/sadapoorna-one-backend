@@ -19,6 +19,7 @@ from routes.Inventory import router as inventory
 from routes.whatsapp_webhook import router as whatsapp_router
 from routes.beat import router as beat_router
 from routes.accounting import router as accounting_router
+from routes.voucher import router as voucher_router
 
 app = FastAPI()
 
@@ -42,6 +43,7 @@ app.include_router(inventory, prefix="/inventory", tags=["Inventory"])
 app.include_router(whatsapp_router, prefix="/whatsapp-webhook", tags=["WhatsApp Webhook"])
 app.include_router(beat_router, prefix="/beats", tags=["Beat Management"])
 app.include_router(accounting_router, prefix="/accounting", tags=["Accounting"])
+app.include_router(voucher_router, prefix="/accounting/vouchers", tags=["Accounting Vouchers"])
 
 
 @app.get("/")
