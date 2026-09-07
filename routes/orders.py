@@ -62,6 +62,7 @@ ORDER_STATUSES = [
     "Completed",
     "Delivered",
     "Cancelled",
+    "Rejected",
 ]
 
 RECORD_STATUSES = [
@@ -616,6 +617,7 @@ def enrich_orders_with_references(
                 {
                     "_id": 1,
                     "name": 1,
+                    "company_name": 1,
                     "mobile": 1,
                     "billing_address": 1,
                     "shipping_address": 1,
@@ -945,6 +947,9 @@ def enrich_orders_with_references(
                 "name": customer.get(
                     "name"
                 ),
+                "shop_name": customer.get(
+                    "company_name"
+                ),
 
                 "mobile": customer.get(
                     "mobile"
@@ -1117,7 +1122,9 @@ def enrich_orders_with_references(
             "items",
             []
         ):
-
+            item_id = item.get(
+                "item_id",''
+            )
             product_id = item.get(
                 "product_id"
             )
@@ -1256,6 +1263,14 @@ def enrich_orders_with_references(
             # ---------------------------------------------
 
             response_item = {
+                "item_id": (
+                    str(item_id)
+                    if isinstance(
+                        item_id,
+                        ObjectId
+                    )
+                    else item_id
+                ),
 
                 "product_id": (
                     str(product_id)
@@ -1324,6 +1339,29 @@ def enrich_orders_with_references(
 
         response_order["items"] = response_items
 
+        if order.get("type") in ["sale_return", "purchase_return"]:
+            ref_invoice_id = order.get("ref_invoice_id")
+
+            ref_invoice_no = None
+
+            if ref_invoice_id:
+                try:
+                    if not isinstance(ref_invoice_id, ObjectId):
+                        ref_invoice_id = ObjectId(str(ref_invoice_id))
+
+                    parent_order = orders_collection.find_one(
+                        {"_id": ref_invoice_id},
+                        {"invoice_no": 1}
+                    )
+
+                    if parent_order:
+                        ref_invoice_no = parent_order.get("invoice_no")
+
+                except Exception:
+                    ref_invoice_no = None
+
+            response_order["ref_invoice_no"] = ref_invoice_no
+
         # =================================================
         # SERIALIZE
         # =================================================
@@ -1381,6 +1419,8 @@ class OrderItem(BaseModel):
     ] = Field(
         default_factory=list
     )
+
+    ref_item_id: Optional[str]|None = None
 
 
 # =========================================================
@@ -1445,6 +1485,7 @@ class OrderCreate(BaseModel):
         "Completed",
         "Delivered",
         "Cancelled",
+        "Rejected",
     ] = "Pending"
 
     record_status: Literal[
@@ -1501,6 +1542,7 @@ class OrderUpdate(BaseModel):
             "Completed",
             "Delivered",
             "Cancelled",
+            "Rejected",
         ]
     ] = None
 
@@ -1528,6 +1570,7 @@ class OrderStatusUpdate(BaseModel):
         "Completed",
         "Delivered",
         "Cancelled",
+        "Rejected",
     ]
 
     note: Optional[str] = None
@@ -1805,292 +1848,137 @@ def validate_investor(
     return investor_object_id
 
 
-# =========================================================
-# BUILD ITEMS
-# =========================================================
-
-def build_items(
-    items: List[OrderItem],
-    gst_type: str
-):
-
+def build_items(items, gst_type, order_type=None):
     processed_items = []
-
     subtotal = 0
-
     total_gst = 0
 
-    # =====================================================
-    # PROCESS EACH ITEM
-    # =====================================================
-
     for item in items:
-
-        # =================================================
-        # PRODUCT
-        # =================================================
-
-        product_object_id = validate_object_id(
-            item.product_id,
-            "product_id"
-        )
+        try:
+            product_object_id = ObjectId(str(item.product_id))
+        except Exception:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid product_id: {item.product_id}"
+            )
 
         product = products_collection.find_one(
-            {
-                "_id": product_object_id
-            },
-            {
-                "_id": 1,
-                "name": 1,
-            }
+            {"_id": product_object_id},
+            {"_id": 1, "name": 1}
         )
 
         if not product:
-
             raise HTTPException(
                 status_code=404,
-                detail=(
-                    f"Product not found: "
-                    f"{item.product_id}"
-                )
+                detail=f"Product not found: {item.product_id}"
             )
 
-        # =================================================
-        # VARIANT
-        # =================================================
+        try:
+            variant_object_id = ObjectId(str(item.variant_id))
+        except Exception:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid variant_id: {item.variant_id}"
+            )
 
-        variant_object_id = validate_object_id(
-            item.variant_id,
-            "variant_id"
-        )
-
-        variant = product_variants_collection.find_one(
-            {
-                "_id": variant_object_id,
-                "product_id": product_object_id,
-            },
-            {
-                "_id": 1,
-                "product_id": 1,
-                "gst_percent": 1,
-                "status": 1,
-            }
-        )
+        variant = product_variants_collection.find_one({
+            "_id": variant_object_id,
+            "product_id": product_object_id
+        })
 
         if not variant:
-
             raise HTTPException(
                 status_code=404,
-                detail=(
-                    f"Product variant not found: "
-                    f"{item.variant_id}"
-                )
+                detail=f"Product variant not found: {item.variant_id}"
             )
 
-        # =================================================
-        # VARIANT STATUS
-        # =================================================
-
-        if variant.get(
-            "status"
-        ) == "inactive":
-
+        if variant.get("status") == "inactive":
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    f"Product variant is inactive: "
-                    f"{item.variant_id}"
-                )
+                detail=f"Product variant is inactive: {item.variant_id}"
             )
 
-        # =================================================
-        # GST
-        # =================================================
+        quantity = float(item.quantity)
+        rate = float(item.rate)
 
-        gst_percent = float(
-            variant.get(
-                "gst_percent",
-                0
-            )
-        )
-
-        # =================================================
-        # INVESTORS
-        # =================================================
-
-        investors = []
-
-        investor_quantity = 0
-
-        investor_ids = set()
-
-        for allocation in item.investors:
-
-            investor_object_id = validate_investor(
-                allocation.investor_id
-            )
-
-            if investor_object_id in investor_ids:
-
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "Same investor cannot be "
-                        "allocated multiple times "
-                        f"for variant "
-                        f"{item.variant_id}"
-                    )
-                )
-
-            investor_ids.add(
-                investor_object_id
-            )
-
-            investor_quantity += (
-                allocation.quantity
-            )
-
-            investors.append({
-
-                "investor_id":
-                    investor_object_id,
-
-                "quantity":
-                    allocation.quantity,
-            })
-
-        # =================================================
-        # INVESTOR QUANTITY CHECK
-        # =================================================
-
-        if investor_quantity > item.quantity:
-
+        if quantity <= 0:
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    "Total investor quantity "
-                    "cannot be greater than "
-                    f"item quantity for "
-                    f"variant {item.variant_id}"
-                )
+                detail="Quantity must be greater than zero"
             )
 
-        # =================================================
-        # LINE AMOUNT
-        # =================================================
+        if rate < 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Rate cannot be negative"
+            )
 
-        line_amount = (
-            item.quantity
-            * item.rate
-        )
-
-        # =================================================
-        # GST INCLUDING
-        # =================================================
+        gst_percent = float(variant.get("gst_percent", 0))
+        line_amount = round(quantity * rate, 2)
 
         if gst_type == "including":
-
-            taxable_amount = (
-
-                line_amount
-                * 100
-                / (
-                    100
-                    + gst_percent
+            if gst_percent > 0:
+                taxable_amount = round(
+                    line_amount * 100 / (100 + gst_percent), 2
                 )
-
-                if gst_percent > 0
-
-                else line_amount
-            )
-
-            gst_amount = (
-                line_amount
-                - taxable_amount
-            )
-
-        # =================================================
-        # GST EXCLUDING
-        # =================================================
-
+                gst_amount = round(
+                    line_amount - taxable_amount, 2
+                )
+            else:
+                taxable_amount = line_amount
+                gst_amount = 0
         else:
-
             taxable_amount = line_amount
-
-            gst_amount = (
-                taxable_amount
-                * gst_percent
-                / 100
+            gst_amount = round(
+                taxable_amount * gst_percent / 100, 2
             )
 
-        # =================================================
-        # TOTAL LINE
-        # =================================================
-
-        total_line_amount = (
-            taxable_amount
-            + gst_amount
+        total_line_amount = round(
+            taxable_amount + gst_amount, 2
         )
 
         subtotal += taxable_amount
-
         total_gst += gst_amount
 
-        # =================================================
-        # STORE DATA
-        # =================================================
+        processed_item = {
+            "item_id": ObjectId(),
+            "product_id": product_object_id,
+            "variant_id": variant_object_id,
+            "quantity": quantity,
+            "rate": rate,
+            "gst_percent": gst_percent,
+            "gst_amount": gst_amount,
+            "taxable_amount": taxable_amount,
+            "total_amount": total_line_amount,
+            "investors": getattr(item, "investors", []),
+            "batch_consumptions": [],
+            "cogs": 0
+        }
 
-        processed_items.append({
+        if order_type == "sale_return":
+            if not getattr(item, "ref_item_id", None):
+                raise HTTPException(
+                    status_code=400,
+                    detail="ref_item_id is required for sale return items"
+                )
 
-            "product_id":
-                product_object_id,
+            try:
+                processed_item["ref_item_id"] = ObjectId(
+                    str(item.ref_item_id)
+                )
+            except Exception:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid ref_item_id: {item.ref_item_id}"
+                )
 
-            "variant_id":
-                variant_object_id,
-
-            "quantity":
-                item.quantity,
-
-            "rate":
-                item.rate,
-
-            "gst_percent":
-                gst_percent,
-
-            "gst_amount":
-                round(
-                    gst_amount,
-                    2
-                ),
-
-            "taxable_amount":
-                round(
-                    taxable_amount,
-                    2
-                ),
-
-            "total_amount":
-                round(
-                    total_line_amount,
-                    2
-                ),
-
-            "investors":
-                investors,
-        })
+        processed_items.append(processed_item)
 
     return (
         processed_items,
-        round(
-            subtotal,
-            2
-        ),
-        round(
-            total_gst,
-            2
-        )
+        round(subtotal, 2),
+        round(total_gst, 2)
     )
-
 
 # =========================================================
 # GENERATE ORDER NUMBER
@@ -2314,7 +2202,8 @@ def create_order(
         total_gst
     ) = build_items(
         data.items,
-        data.gst_type
+        data.gst_type,
+        data.type
     )
 
     # =====================================================
@@ -2391,6 +2280,10 @@ def create_order(
         "items":
             processed_items,
 
+        "total_cogs": 0,
+
+        "gross_profit": 0,
+
         "subtotal":
             subtotal,
 
@@ -2405,6 +2298,8 @@ def create_order(
                 other_charges,
                 2
             ),
+
+        
 
         "grand_total":
             round(
@@ -3020,8 +2915,11 @@ def update_order(
         ) = build_items(
 
             data.items,
+            gst_type,
+            existing_order.get(
+                "type"
+            )
 
-            gst_type
         )
 
         update_data[
@@ -3362,7 +3260,7 @@ def generate_invoice_pdf(order):
     supplier_code = os.getenv("SUPPLIER_STATE_CODE", "23")
 
     customer_name = (
-        customer.get("shop")
+        customer.get("shop_name")
         or customer.get("owner")
         or customer.get("name")
         or "Walk-in Customer"
@@ -3788,13 +3686,332 @@ def send_invoice_whatsapp(pdf_bytes, invoice_no, from_number):
     return send_resp.json()
 
 
+# =========================================================
+# GET PURCHASE BATCHES FOR PRODUCT / VARIANT / WAREHOUSE
+# =========================================================
+
+def get_purchase_batches(
+    product_id,
+    variant_id,
+    warehouse_id
+):
+    """
+    Purchase order items are treated as stock batches.
+
+    FIFO:
+        oldest purchase first
+    """
+
+    pipeline = [
+        {
+            "$match": {
+                "type": "purchase",
+                "status": "Completed",
+                "record_status": "active",
+                "warehouse_id": warehouse_id
+            }
+        },
+        {
+            "$unwind": "$items"
+        },
+        {
+            "$match": {
+                "items.product_id": product_id,
+                "items.variant_id": variant_id
+            }
+        },
+        {
+            "$sort": {
+                "created_at": 1,
+                "_id": 1
+            }
+        }
+    ]
+
+    return list(
+        orders_collection.aggregate(pipeline)
+    )
+
+
+# =========================================================
+# GET CONSUMED QUANTITY FROM BATCH
+# =========================================================
+
+def get_batch_consumed_quantity(
+    purchase_order_id,
+    purchase_item_id
+):
+    """
+    Finds how much of a purchase item has already
+    been consumed by sales.
+    """
+
+    pipeline = [
+        {
+            "$match": {
+                "type": "sale",
+                "record_status": "active",
+                "status": "Delivered"
+            }
+        },
+        {
+            "$unwind": "$items"
+        },
+        {
+            "$unwind": {
+                "path": "$items.batch_consumptions",
+                "preserveNullAndEmptyArrays": False
+            }
+        },
+        {
+            "$match": {
+                "items.batch_consumptions.purchase_order_id":
+                    purchase_order_id,
+
+                "items.batch_consumptions.purchase_item_id":
+                    purchase_item_id
+            }
+        },
+        {
+            "$group": {
+                "_id": None,
+                "total": {
+                    "$sum":
+                        "$items.batch_consumptions.quantity"
+                }
+            }
+        }
+    ]
+
+    result = list(
+        orders_collection.aggregate(pipeline)
+    )
+
+    if not result:
+        return 0
+
+    return float(result[0]["total"])
+
+
+# =========================================================
+# GET PURCHASE RETURN QUANTITY
+# =========================================================
+
+def get_purchase_return_quantity(
+    purchase_order_id,
+    purchase_item_id
+):
+    """
+    Purchase returns reduce the available quantity
+    of the original purchase batch.
+    """
+
+    pipeline = [
+        {
+            "$match": {
+                "type": "purchase_return",
+                "record_status": "active"
+            }
+        },
+        {
+            "$unwind": "$items"
+        },
+        {
+            "$match": {
+                "ref_invoice_id":
+                    purchase_order_id,
+
+                "items.product_id":
+                    None
+            }
+        }
+    ]
+
+    # We don't use the above generic pipeline because
+    # ref_invoice_id may be stored as the purchase _id
+    # and item-level matching is handled below.
+
+    pipeline = [
+        {
+            "$match": {
+                "type": "purchase_return",
+                "record_status": "active",
+                "ref_invoice_id": purchase_order_id
+            }
+        },
+        {
+            "$unwind": "$items"
+        },
+        {
+            "$match": {
+                "items.ref_purchase_item_id":
+                    purchase_item_id
+            }
+        },
+        {
+            "$group": {
+                "_id": None,
+                "total": {
+                    "$sum": "$items.quantity"
+                }
+            }
+        }
+    ]
+
+    result = list(
+        orders_collection.aggregate(pipeline)
+    )
+
+    if not result:
+        return 0
+
+    return float(result[0]["total"])
+
+# =========================================================
+# ALLOCATE STOCK USING FIFO
+# =========================================================
+
+def allocate_fifo(
+    product_id,
+    variant_id,
+    warehouse_id,
+    required_quantity
+):
+    """
+    Allocate required quantity from purchase orders
+    using FIFO.
+
+    Returns:
+        batch_consumptions
+        total_cogs
+    """
+
+    required_quantity = float(
+        required_quantity
+    )
+
+    if required_quantity <= 0:
+        return [], 0
+
+    batches = get_purchase_batches(
+        product_id=product_id,
+        variant_id=variant_id,
+        warehouse_id=warehouse_id
+    )
+
+    remaining_required = required_quantity
+
+    consumptions = []
+
+    total_cogs = 0
+
+    for batch in batches:
+
+        purchase_item = batch["items"]
+
+        purchase_order_id = batch["_id"]
+
+        purchase_item_id = (
+            purchase_item["item_id"]
+        )
+
+        purchased_qty = float(
+            purchase_item["quantity"]
+        )
+
+        consumed_qty = get_batch_consumed_quantity(
+            purchase_order_id,
+            purchase_item_id
+        )
+
+        returned_qty = get_purchase_return_quantity(
+            purchase_order_id,
+            purchase_item_id
+        )
+
+        available_qty = (
+            purchased_qty
+            - consumed_qty
+            - returned_qty
+        )
+
+        if available_qty <= 0:
+            continue
+
+        consume_qty = min(
+            available_qty,
+            remaining_required
+        )
+
+        purchase_rate = float(
+            purchase_item["rate"]
+        )
+
+        cost = (
+            consume_qty
+            * purchase_rate
+        )
+
+        consumptions.append({
+            "purchase_order_id":
+                purchase_order_id,
+
+            "purchase_item_id":
+                purchase_item_id,
+
+            "quantity":
+                consume_qty,
+
+            "purchase_rate":
+                purchase_rate,
+
+            "cost":
+                round(cost, 2)
+        })
+
+        total_cogs += cost
+
+        remaining_required -= consume_qty
+
+        if remaining_required <= 0:
+            break
+
+    if remaining_required > 0:
+
+        available = (
+            required_quantity
+            - remaining_required
+        )
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Insufficient stock for product "
+                f"{product_id}, variant {variant_id}. "
+                f"Required: {required_quantity}, "
+                f"Available: {available}"
+            )
+        )
+
+    return (
+        consumptions,
+        round(total_cogs, 2)
+    )
+
 
 # =========================================================
 # MANUAL BILLING
 # POST /orders/billing/v1/{order_id}
 #
-# Creates the bill and automatically sends invoice
-# to customer on WhatsApp.
+# Supports:
+#   1. sale
+#   2. sale_return
+#
+# SALE:
+#   Purchase batches -> FIFO -> Sale
+#
+# SALES RETURN:
+#   Sale batch_consumptions -> restore stock
 #
 # PDF is NOT returned from this API.
 # =========================================================
@@ -3808,9 +4025,9 @@ def manual_bill_order(
     current_user=Depends(get_current_user)
 ):
 
-    # -----------------------------------------------------
+    # =====================================================
     # VALIDATE ORDER ID
-    # -----------------------------------------------------
+    # =====================================================
 
     try:
         order_object_id = ObjectId(order_id)
@@ -3821,9 +4038,9 @@ def manual_bill_order(
             detail="Invalid order MongoDB ID"
         )
 
-    # -----------------------------------------------------
+    # =====================================================
     # GET ORDER
-    # -----------------------------------------------------
+    # =====================================================
 
     order = orders_collection.find_one({
         "_id": order_object_id
@@ -3835,19 +4052,27 @@ def manual_bill_order(
             detail="Order not found"
         )
 
-    # -----------------------------------------------------
-    # BILLING ONLY FOR SALE ORDERS
-    # -----------------------------------------------------
+    order_type = order.get("type")
 
-    if order.get("type") != "sale":
+    # =====================================================
+    # BILLING ONLY FOR SALE / SALES RETURN
+    # =====================================================
+
+    if order_type not in [
+        "sale",
+        "sale_return"
+    ]:
         raise HTTPException(
             status_code=400,
-            detail="Manual billing is allowed only for sale orders"
+            detail=(
+                "Manual billing is allowed only for "
+                "sale and sale_return orders"
+            )
         )
 
-    # -----------------------------------------------------
+    # =====================================================
     # CHECK RECORD STATUS
-    # -----------------------------------------------------
+    # =====================================================
 
     if order.get(
         "record_status",
@@ -3859,9 +4084,9 @@ def manual_bill_order(
             detail="Inactive orders cannot be billed"
         )
 
-    # -----------------------------------------------------
+    # =====================================================
     # CHECK ALREADY BILLED
-    # -----------------------------------------------------
+    # =====================================================
 
     if order.get("invoice_no"):
 
@@ -3872,6 +4097,58 @@ def manual_bill_order(
                 f"invoice {order['invoice_no']}"
             )
         )
+
+    # =====================================================
+    # SALES RETURN VALIDATION
+    # =====================================================
+
+    original_sale = None
+
+    if order_type == "sale_return":
+
+        ref_invoice_id = order.get("ref_invoice_id")
+
+        if not ref_invoice_id:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "ref_invoice_id is required "
+                    "for sales return"
+                )
+            )
+
+        # -------------------------------------------------
+        # GET ORIGINAL SALE
+        # -------------------------------------------------
+
+        original_sale = orders_collection.find_one({
+            "_id": ref_invoice_id,
+            "type": "sale",
+            "record_status": "active"
+        })
+
+        if not original_sale:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Original sale order referenced by "
+                    "ref_invoice_id was not found"
+                )
+            )
+
+        # -------------------------------------------------
+        # ORIGINAL SALE MUST BE BILLED
+        # -------------------------------------------------
+
+        if not original_sale.get("invoice_no"):
+
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Original sale must be billed "
+                    "before it can be returned"
+                )
+            )
 
     # =====================================================
     # CALCULATE BILL
@@ -3889,17 +4166,13 @@ def manual_bill_order(
         order.get("other_charges")
     )
 
-    # -----------------------------------------------------
+    # =====================================================
     # DISCOUNT
-    # -----------------------------------------------------
+    # =====================================================
 
     discount = _pdf_money(
         data.discount_amount
     )
-
-    # -----------------------------------------------------
-    # VALIDATE DISCOUNT
-    # -----------------------------------------------------
 
     if discount < 0:
 
@@ -3908,9 +4181,9 @@ def manual_bill_order(
             detail="Discount cannot be negative"
         )
 
-    # -----------------------------------------------------
+    # =====================================================
     # GROSS TOTAL
-    # -----------------------------------------------------
+    # =====================================================
 
     gross_total = round(
         subtotal +
@@ -3919,9 +4192,9 @@ def manual_bill_order(
         2
     )
 
-    # -----------------------------------------------------
-    # DISCOUNT CANNOT EXCEED BILL
-    # -----------------------------------------------------
+    # =====================================================
+    # DISCOUNT VALIDATION
+    # =====================================================
 
     if discount > gross_total:
 
@@ -3933,9 +4206,9 @@ def manual_bill_order(
             )
         )
 
-    # -----------------------------------------------------
+    # =====================================================
     # GRAND TOTAL
-    # -----------------------------------------------------
+    # =====================================================
 
     grand_total = round(
         gross_total - discount,
@@ -3943,11 +4216,512 @@ def manual_bill_order(
     )
 
     # =====================================================
-    # GENERATE UNIQUE INVOICE NUMBER
+    # COGS / FIFO
+    # =====================================================
+
+    total_cogs = 0
+
+    # =====================================================
+    # SALE
+    #
+    # Sale billing consumes purchase batches FIFO.
+    # =====================================================
+
+    if order_type == "sale":
+
+        for item in order.get("items", []):
+
+            product_id = item.get("product_id")
+            variant_id = item.get("variant_id")
+
+            quantity = float(
+                item.get("quantity", 0)
+            )
+
+            if not product_id or not variant_id:
+
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Invalid product/variant "
+                        "in sale item"
+                    )
+                )
+
+            if quantity <= 0:
+
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Sale quantity must be "
+                        "greater than zero"
+                    )
+                )
+
+            # -------------------------------------------------
+            # FIFO ALLOCATION
+            # -------------------------------------------------
+
+            batch_consumptions, item_cogs = allocate_fifo(
+                product_id=product_id,
+                variant_id=variant_id,
+                warehouse_id=order.get(
+                    "warehouse_id"
+                ),
+                required_quantity=quantity
+            )
+
+            # -------------------------------------------------
+            # SAVE FIFO INFORMATION IN SALE ITEM
+            # -------------------------------------------------
+
+            item["batch_consumptions"] = (
+                batch_consumptions
+            )
+
+            item["cogs"] = round(
+                item_cogs,
+                2
+            )
+
+            total_cogs += item_cogs
+
+    # =====================================================
+    # SALES RETURN
+    #
+    # Restore the exact batches consumed by original sale.
+    # =====================================================
+
+    elif order_type == "sale_return":
+
+        for item in order.get("items", []):
+
+            product_id = item.get("product_id")
+            variant_id = item.get("variant_id")
+
+            quantity = float(
+                item.get("quantity", 0)
+            )
+
+            ref_item_id = item.get(
+                "ref_item_id"
+            )
+
+            # -------------------------------------------------
+            # VALIDATE RETURN ITEM
+            # -------------------------------------------------
+
+            if not product_id or not variant_id:
+
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Invalid product/variant "
+                        "in sales return item"
+                    )
+                )
+
+            if quantity <= 0:
+
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Sales return quantity must "
+                        "be greater than zero"
+                    )
+                )
+
+            if not ref_item_id:
+
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "ref_item_id is required "
+                        "for every sales return item"
+                    )
+                )
+
+            # -------------------------------------------------
+            # FIND ORIGINAL SALE ITEM
+            # -------------------------------------------------
+
+            original_sale_item = None
+
+            for sale_item in original_sale.get(
+                "items",
+                []
+            ):
+
+                if str(
+                    sale_item.get("item_id")
+                ) == str(ref_item_id):
+
+                    original_sale_item = sale_item
+                    break
+
+            if not original_sale_item:
+
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Original sale item "
+                        f"{ref_item_id} not found"
+                    )
+                )
+
+            # -------------------------------------------------
+            # MAKE SURE PRODUCT / VARIANT MATCH
+            # -------------------------------------------------
+
+            if str(
+                original_sale_item.get(
+                    "product_id"
+                )
+            ) != str(product_id):
+
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Return product does not match "
+                        "original sale item"
+                    )
+                )
+
+            if str(
+                original_sale_item.get(
+                    "variant_id"
+                )
+            ) != str(variant_id):
+
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Return variant does not match "
+                        "original sale item"
+                    )
+                )
+
+            original_quantity = float(
+                original_sale_item.get(
+                    "quantity",
+                    0
+                )
+            )
+
+            # -------------------------------------------------
+            # CALCULATE PREVIOUSLY RETURNED QUANTITY
+            # -------------------------------------------------
+
+            previously_returned = 0
+
+            previous_returns = orders_collection.find({
+                "type": "sale_return",
+                "ref_invoice_id": original_sale["_id"],
+                "record_status": "active",
+                "invoice_no": {
+                    "$exists": True,
+                    "$ne": None
+                }
+            })
+
+            for previous_return in previous_returns:
+
+                for return_item in previous_return.get(
+                    "items",
+                    []
+                ):
+
+                    if str(
+                        return_item.get(
+                            "ref_item_id"
+                        )
+                    ) == str(ref_item_id):
+
+                        previously_returned += float(
+                            return_item.get(
+                                "quantity",
+                                0
+                            )
+                        )
+
+            # -------------------------------------------------
+            # AVAILABLE FOR RETURN
+            # -------------------------------------------------
+
+            available_for_return = round(
+                original_quantity -
+                previously_returned,
+                6
+            )
+
+            if quantity > available_for_return:
+
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Return quantity {quantity} "
+                        f"cannot exceed remaining "
+                        f"returnable quantity "
+                        f"{available_for_return}"
+                    )
+                )
+
+            # =================================================
+            # RESTORE ORIGINAL SALE BATCHES
+            # =================================================
+
+            original_batches = (
+                original_sale_item.get(
+                    "batch_consumptions",
+                    []
+                )
+            )
+
+            if not original_batches:
+
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Original sale item does not "
+                        "contain FIFO batch information"
+                    )
+                )
+
+            # -------------------------------------------------
+            # DETERMINE HOW MUCH OF EACH BATCH WAS ALREADY
+            # RETURNED
+            # -------------------------------------------------
+
+            already_returned_by_batch = {}
+
+            previous_returns = orders_collection.find({
+                "type": "sale_return",
+                "ref_invoice_id": original_sale["_id"],
+                "record_status": "active",
+                "invoice_no": {
+                    "$exists": True,
+                    "$ne": None
+                }
+            })
+
+            for previous_return in previous_returns:
+
+                for return_item in previous_return.get(
+                    "items",
+                    []
+                ):
+
+                    if str(
+                        return_item.get(
+                            "ref_item_id"
+                        )
+                    ) != str(ref_item_id):
+
+                        continue
+
+                    for batch in return_item.get(
+                        "batch_consumptions",
+                        []
+                    ):
+
+                        purchase_order_id = str(
+                            batch.get(
+                                "purchase_order_id"
+                            )
+                        )
+
+                        purchase_item_id = str(
+                            batch.get(
+                                "purchase_item_id"
+                            )
+                        )
+
+                        batch_key = (
+                            purchase_order_id,
+                            purchase_item_id
+                        )
+
+                        already_returned_by_batch[
+                            batch_key
+                        ] = (
+                            already_returned_by_batch.get(
+                                batch_key,
+                                0
+                            )
+                            +
+                            float(
+                                batch.get(
+                                    "quantity",
+                                    0
+                                )
+                            )
+                        )
+
+            # -------------------------------------------------
+            # ALLOCATE RETURN AGAINST ORIGINAL BATCHES
+            # -------------------------------------------------
+
+            remaining_return_quantity = quantity
+            return_batch_consumptions = []
+            item_cogs = 0
+
+            for batch in original_batches:
+
+                if remaining_return_quantity <= 0:
+                    break
+
+                purchase_order_id = batch.get(
+                    "purchase_order_id"
+                )
+
+                purchase_item_id = batch.get(
+                    "purchase_item_id"
+                )
+
+                purchase_rate = float(
+                    batch.get(
+                        "purchase_rate",
+                        0
+                    )
+                )
+
+                original_batch_quantity = float(
+                    batch.get(
+                        "quantity",
+                        0
+                    )
+                )
+
+                batch_key = (
+                    str(purchase_order_id),
+                    str(purchase_item_id)
+                )
+
+                already_returned = float(
+                    already_returned_by_batch.get(
+                        batch_key,
+                        0
+                    )
+                )
+
+                available_batch_quantity = round(
+                    original_batch_quantity -
+                    already_returned,
+                    6
+                )
+
+                if available_batch_quantity <= 0:
+                    continue
+
+                restore_quantity = min(
+                    available_batch_quantity,
+                    remaining_return_quantity
+                )
+
+                restore_quantity = round(
+                    restore_quantity,
+                    6
+                )
+
+                batch_cost = round(
+                    restore_quantity *
+                    purchase_rate,
+                    2
+                )
+
+                return_batch_consumptions.append({
+                    "purchase_order_id": (
+                        purchase_order_id
+                    ),
+                    "purchase_item_id": (
+                        purchase_item_id
+                    ),
+                    "quantity": restore_quantity,
+                    "purchase_rate": purchase_rate,
+                    "cost": batch_cost
+                })
+
+                item_cogs += batch_cost
+
+                remaining_return_quantity = round(
+                    remaining_return_quantity -
+                    restore_quantity,
+                    6
+                )
+
+            # -------------------------------------------------
+            # SAFETY CHECK
+            # -------------------------------------------------
+
+            if remaining_return_quantity > 0:
+
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Unable to map the complete "
+                        "return quantity to original "
+                        "sale batches"
+                    )
+                )
+
+            # -------------------------------------------------
+            # SAVE RETURN BATCH INFORMATION
+            # -------------------------------------------------
+
+            item["batch_consumptions"] = (
+                return_batch_consumptions
+            )
+
+            item["cogs"] = round(
+                item_cogs,
+                2
+            )
+
+            total_cogs += item_cogs
+
+    # =====================================================
+    # FINAL COGS
+    # =====================================================
+
+    total_cogs = round(
+        total_cogs,
+        2
+    )
+
+    # =====================================================
+    # NET SALES
+    # =====================================================
+
+    net_sales = round(
+        subtotal - discount,
+        2
+    )
+
+    # =====================================================
+    # GROSS PROFIT
+    # =====================================================
+
+    gross_profit = round(
+        net_sales - total_cogs,
+        2
+    )
+
+    # =====================================================
+    # GENERATE INVOICE NUMBER
+    #
+    # Separate series:
+    #
+    # SALE:
+    #   INV-2026-09-xxxx
+    #
+    # SALES RETURN:
+    #   RET-2026-09-xxxx
+    #
+    # Assuming generate_invoice_no() supports the type.
     # =====================================================
 
     invoice_no = generate_invoice_no(
-        "sale"
+        order_type
     )
 
     now = utc_now()
@@ -3965,7 +4739,7 @@ def manual_bill_order(
             current_user["user_id"]
         ),
         note=(
-            f"Manual billing completed. "
+            f"{order_type} billing completed. "
             f"Invoice {invoice_no}. "
             f"Discount applied: {discount:.2f}"
         ),
@@ -3978,28 +4752,60 @@ def manual_bill_order(
     result = orders_collection.update_one(
         {
             "_id": order["_id"],
-            "type": "sale",
+            "type": order_type,
             "record_status": "active",
             "$or": [
                 {"invoice_no": None},
-                {"invoice_no": {"$exists": False}},
+                {
+                    "invoice_no": {
+                        "$exists": False
+                    }
+                },
                 {"invoice_no": ""},
             ],
         },
         {
             "$set": {
                 "invoice_no": invoice_no,
+
                 "discount": discount,
+
                 "grand_total": grand_total,
+
+                # -----------------------------------------
+                # FIFO / COGS
+                # -----------------------------------------
+
+                "items": order["items"],
+
+                "total_cogs": total_cogs,
+
+                "gross_profit": gross_profit,
+
+                # -----------------------------------------
+                # BILLING
+                # -----------------------------------------
+
                 "billed_at": now,
+
                 "billed_by": validate_object_id(
-                    str(current_user["user_id"]),
+                    str(
+                        current_user["user_id"]
+                    ),
                     "user_id"
                 ),
+
+                # -----------------------------------------
+                # WHATSAPP
+                # -----------------------------------------
+
                 "invoice_whatsapp_sent": False,
+
                 "invoice_whatsapp_status": "pending",
+
                 "updated_at": now,
             },
+
             "$push": {
                 "tracking": billing_tracking
             }
@@ -4016,21 +4822,24 @@ def manual_bill_order(
             "_id": order["_id"]
         })
 
-        if latest and latest.get("invoice_no"):
+        if latest and latest.get(
+            "invoice_no"
+        ):
 
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    f"Order {order_id} was already billed "
-                    f"with invoice {latest['invoice_no']}"
+                    f"Order {order_id} was already "
+                    f"billed with invoice "
+                    f"{latest['invoice_no']}"
                 )
             )
 
         raise HTTPException(
             status_code=409,
             detail=(
-                "Order could not be billed because it "
-                "was modified by another request"
+                "Order could not be billed because "
+                "it was modified by another request"
             )
         )
 
@@ -4053,7 +4862,7 @@ def manual_bill_order(
         )
 
     # =====================================================
-    # ENRICH ORDER FOR WHATSAPP/REFERENCES
+    # ENRICH ORDER
     # =====================================================
 
     try:
@@ -4094,21 +4903,47 @@ def manual_bill_order(
     whatsapp_sent = False
     whatsapp_error = None
 
-    customer = enriched_order.get("customer") or {}
-    raw_mobile = customer.get("mobile", "919131037870")
-    
-    # Clean phone number (ensure E.164 format with '91' prefix)
-    clean_number = "".join(filter(str.isdigit, str(raw_mobile)))
+    customer = (
+        enriched_order.get("customer")
+        or {}
+    )
+
+    raw_mobile = customer.get(
+        "mobile",
+        "919131037870"
+    )
+
+    # -----------------------------------------------------
+    # CLEAN PHONE NUMBER
+    # -----------------------------------------------------
+
+    clean_number = "".join(
+        filter(
+            str.isdigit,
+            str(raw_mobile)
+        )
+    )
+
     if not clean_number.startswith("91"):
-        clean_number = f"91{clean_number}"
+
+        clean_number = (
+            f"91{clean_number}"
+        )
 
     try:
-        send_invoice_template_whatsapp(enriched_order)
+
+        send_invoice_template_whatsapp(
+            enriched_order
+        )
+
         whatsapp_sent = True
 
     except Exception as exc:
+
         whatsapp_sent = False
+
         whatsapp_error = str(exc)
+
         print(
             f"WhatsApp invoice delivery failed "
             f"for {invoice_no}: {exc}"
@@ -4192,43 +5027,66 @@ def manual_bill_order(
     # =====================================================
 
     if whatsapp_sent:
+
         message = (
-            "Order billed successfully and "
-            "invoice sent on WhatsApp"
+            f"{'Sale' if order_type == 'sale' else 'Sales return'} "
+            f"billed successfully and "
+            f"invoice sent on WhatsApp"
         )
+
     else:
+
         message = (
-            "Order billed successfully, "
-            "but WhatsApp delivery failed"
+            f"{'Sale' if order_type == 'sale' else 'Sales return'} "
+            f"billed successfully, "
+            f"but WhatsApp delivery failed"
         )
 
     return {
         "success": True,
+
         "message": message,
+
         "order_id": order_id,
+
+        "order_type": order_type,
+
         "invoice_no": invoice_no,
+
         "subtotal": subtotal,
+
         "total_gst": total_gst,
+
         "other_charges": other_charges,
+
         "gross_total": gross_total,
+
         "discount": discount,
+
         "grand_total": grand_total,
+
+        "total_cogs": total_cogs,
+
+        "gross_profit": gross_profit,
+
         "billed_at": now,
+
         "whatsapp_sent": whatsapp_sent,
+
         "whatsapp_status": (
             "sent"
             if whatsapp_sent
             else "failed"
         ),
+
         "whatsapp_error": (
             whatsapp_error
             if not whatsapp_sent
             else None
         ),
+
         "pdf_available": True,
     }
-
-
 # =========================================================
 # GET /orders/get-bill/v1/{order_id}/pdf
 #
@@ -4249,6 +5107,7 @@ def manual_bill_order(
         }
     },
 )
+
 def get_bill_pdf(
     order_id: str,
     # current_user=Depends(get_current_user)
@@ -4290,7 +5149,10 @@ def get_bill_pdf(
     # ONLY SALE
     # -----------------------------------------------------
 
-    if order.get("type") != "sale":
+    if order.get("type") not in [
+            "sale",
+            "sale_return"
+        ]:
 
         raise HTTPException(
             status_code=400,
@@ -4453,7 +5315,10 @@ def resend_bill_whatsapp(
     # ONLY SALE
     # -----------------------------------------------------
 
-    if order.get("type") != "sale":
+    if order.get("type") not in [
+            "sale",
+            "sale_return"
+        ]:
 
         raise HTTPException(
             status_code=400,

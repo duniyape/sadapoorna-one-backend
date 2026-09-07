@@ -3587,6 +3587,7 @@ def get_unblocked_stock(
                 total_pages
         }
     }
+
 # =========================================================
 # VEHICLE INVENTORY
 # =========================================================
@@ -3612,7 +3613,8 @@ def get_unblocked_stock(
 
 VEHICLE_INVENTORY_TYPES = [
     "warehouse_to_vehicle",
-    "sale"
+    "sale",
+    "sale_return"
 ]
 
 
@@ -3689,6 +3691,11 @@ def get_vehicle_inventory(
             {
                 "type": "sale",
                 "status": "Delivered"
+            },
+
+            {
+                "type": "sale_return",
+                "status": "Completed"
             }
         ]
     }
@@ -3871,7 +3878,28 @@ def get_vehicle_inventory(
                             0
                         ]
                     }
+                },
+
+                "sale_return_quantity": {
+
+                    "$sum": {
+
+                        "$cond": [
+
+                            {
+                                "$eq": [
+                                    "$type",
+                                    "sale_return"
+                                ]
+                            },
+
+                            "$items.quantity",
+
+                            0
+                        ]
+                    }
                 }
+
             }
         },
 
@@ -3887,11 +3915,16 @@ def get_vehicle_inventory(
 
                 "available_quantity": {
 
-                    "$subtract": [
+                    "$add": [
 
                         "$warehouse_to_vehicle_quantity",
-
-                        "$sale_quantity"
+                        "$sale_return_quantity",
+                        {
+                            "$multiply": [
+                                "$sale_quantity",
+                                -1
+                            ]
+                        }
                     ]
                 }
             }
@@ -4345,6 +4378,12 @@ def get_vehicle_inventory(
                     0
                 ),
 
+            "sale_return_quantity":
+                row.get(
+                    "sale_return_quantity",
+                    0
+                ),
+
 
             # ---------------------------------------------
             # CURRENT VEHICLE STOCK
@@ -4512,6 +4551,805 @@ def get_vehicle_inventory(
         skip + limit
     ]
 
+
+    # =====================================================
+    # RESPONSE
+    # =====================================================
+
+    return {
+
+        "success":
+            True,
+
+        "data":
+            data,
+
+        "pagination": {
+
+            "page":
+                page,
+
+            "limit":
+                limit,
+
+            "total":
+                total,
+
+            "total_pages":
+                total_pages
+        }
+    }
+
+@router.get(
+    "/batch-stock",
+    tags=["Inventory"]
+)
+def get_batch_stock(
+    page: int = Query(
+        1,
+        ge=1
+    ),
+
+    limit: int = Query(
+        20,
+        ge=1,
+        le=100
+    ),
+
+    warehouse_id: Optional[str] = None,
+
+    product_id: Optional[str] = None,
+
+    variant_id: Optional[str] = None,
+
+    search: Optional[str] = None
+):
+    skip = (page - 1) * limit
+
+    # =====================================================
+    # PURCHASE QUERY
+    # =====================================================
+
+    purchase_query = {
+        "type": "purchase",
+        "status": "Completed",
+        "record_status": "active"
+    }
+
+    if warehouse_id:
+        purchase_query["warehouse_id"] = validate_object_id(
+            warehouse_id,
+            "warehouse_id"
+        )
+
+    if product_id:
+        purchase_query["items.product_id"] = validate_object_id(
+            product_id,
+            "product_id"
+        )
+
+    if variant_id:
+        purchase_query["items.variant_id"] = validate_object_id(
+            variant_id,
+            "variant_id"
+        )
+
+    # =====================================================
+    # GET PURCHASE BATCHES
+    # =====================================================
+
+    purchases = list(
+        orders_collection.find(
+            purchase_query
+        ).sort(
+            "created_at",
+            1
+        )
+    )
+
+    batches = []
+
+    for order in purchases:
+
+        for item in order.get("items", []):
+
+            item_product_id = item.get("product_id")
+            item_variant_id = item.get("variant_id")
+
+            if product_id and str(item_product_id) != str(product_id):
+                continue
+
+            if variant_id and str(item_variant_id) != str(variant_id):
+                continue
+
+            purchase_quantity = float(
+                item.get(
+                    "quantity",
+                    0
+                )
+            )
+
+            purchase_rate = float(
+                item.get(
+                    "rate",
+                    0
+                )
+            )
+
+            purchase_order_id = order["_id"]
+
+            purchase_item_id = item.get(
+                "item_id"
+            )
+
+            if not purchase_item_id:
+                continue
+
+            batches.append({
+                "purchase_order_id": purchase_order_id,
+                "purchase_item_id": purchase_item_id,
+                "invoice_no": order.get(
+                    "invoice_no"
+                ),
+                "purchase_date": order.get(
+                    "created_at"
+                ),
+                "warehouse_id": order.get(
+                    "warehouse_id"
+                ),
+                "product_id": item_product_id,
+                "variant_id": item_variant_id,
+                "purchase_rate": purchase_rate,
+                "purchase_quantity": purchase_quantity
+            })
+
+    # =====================================================
+    # COLLECT BATCH IDS
+    # =====================================================
+
+    batch_keys = {
+        (
+            batch["purchase_order_id"],
+            batch["purchase_item_id"]
+        )
+        for batch in batches
+    }
+
+    # =====================================================
+    # SALES
+    #
+    # Sale consumption is stored in:
+    # items.batch_consumptions
+    # =====================================================
+
+    sold_map = {}
+
+    if batch_keys:
+
+        sales = orders_collection.find({
+            "type": "sale",
+            "status": "Delivered",
+            "record_status": "active",
+            "invoice_no": {
+                "$exists": True,
+                "$nin": [None, ""]
+            }
+        })
+
+        for sale in sales:
+
+            for item in sale.get("items", []):
+
+                for consumption in item.get(
+                    "batch_consumptions",
+                    []
+                ):
+
+                    purchase_order_id = consumption.get(
+                        "purchase_order_id"
+                    )
+
+                    purchase_item_id = consumption.get(
+                        "purchase_item_id"
+                    )
+
+                    if not purchase_order_id or not purchase_item_id:
+                        continue
+
+                    key = (
+                        purchase_order_id,
+                        purchase_item_id
+                    )
+
+                    if key not in batch_keys:
+                        continue
+
+                    quantity = float(
+                        consumption.get(
+                            "quantity",
+                            0
+                        )
+                    )
+
+                    sold_map[key] = (
+                        sold_map.get(
+                            key,
+                            0
+                        )
+                        + quantity
+                    )
+
+    # =====================================================
+    # SALE RETURNS
+    #
+    # Returned stock is restored against the
+    # original consumed batches.
+    # =====================================================
+
+    returned_map = {}
+
+    if batch_keys:
+
+        returns = orders_collection.find({
+            "type": "sale_return",
+            "status": "Completed",
+            "record_status": "active",
+            "invoice_no": {
+                "$exists": True,
+                "$nin": [None, ""]
+            }
+        })
+
+        for return_order in returns:
+
+            for item in return_order.get(
+                "items",
+                []
+            ):
+
+                for consumption in item.get(
+                    "batch_consumptions",
+                    []
+                ):
+
+                    purchase_order_id = consumption.get(
+                        "purchase_order_id"
+                    )
+
+                    purchase_item_id = consumption.get(
+                        "purchase_item_id"
+                    )
+
+                    if not purchase_order_id or not purchase_item_id:
+                        continue
+
+                    key = (
+                        purchase_order_id,
+                        purchase_item_id
+                    )
+
+                    if key not in batch_keys:
+                        continue
+
+                    quantity = float(
+                        consumption.get(
+                            "quantity",
+                            0
+                        )
+                    )
+
+                    returned_map[key] = (
+                        returned_map.get(
+                            key,
+                            0
+                        )
+                        + quantity
+                    )
+
+    # =====================================================
+    # CALCULATE BATCH STOCK
+    # =====================================================
+
+    inventory_rows = []
+
+    for batch in batches:
+
+        key = (
+            batch["purchase_order_id"],
+            batch["purchase_item_id"]
+        )
+
+        sold_quantity = sold_map.get(
+            key,
+            0
+        )
+
+        returned_quantity = returned_map.get(
+            key,
+            0
+        )
+
+        purchase_quantity = batch[
+            "purchase_quantity"
+        ]
+
+        available_quantity = round(
+            purchase_quantity
+            - sold_quantity
+            + returned_quantity,
+            3
+        )
+
+        if available_quantity <= 0:
+            continue
+
+        remaining_value = round(
+            available_quantity
+            * batch["purchase_rate"],
+            2
+        )
+
+        inventory_rows.append({
+            **batch,
+            "sold_quantity": round(
+                sold_quantity,
+                3
+            ),
+            "returned_quantity": round(
+                returned_quantity,
+                3
+            ),
+            "available_quantity": available_quantity,
+            "remaining_value": remaining_value
+        })
+
+    # =====================================================
+    # COLLECT IDS
+    # =====================================================
+
+    product_ids = set()
+    variant_ids = set()
+
+    for row in inventory_rows:
+
+        if row.get("product_id"):
+            product_ids.add(
+                row["product_id"]
+            )
+
+        if row.get("variant_id"):
+            variant_ids.add(
+                row["variant_id"]
+            )
+
+    # =====================================================
+    # PRODUCT MAP
+    # =====================================================
+
+    product_map = {}
+
+    if product_ids:
+
+        products = list(
+            products_collection.find({
+                "_id": {
+                    "$in": list(product_ids)
+                }
+            })
+        )
+
+        product_map = {
+            product["_id"]: product
+            for product in products
+        }
+
+    # =====================================================
+    # VARIANT MAP
+    # =====================================================
+
+    variant_map = {}
+
+    if variant_ids:
+
+        variants = list(
+            product_variants_collection.find({
+                "_id": {
+                    "$in": list(variant_ids)
+                }
+            })
+        )
+
+        variant_map = {
+            variant["_id"]: variant
+            for variant in variants
+        }
+
+    # =====================================================
+    # UNIT + PACKAGING IDS
+    # =====================================================
+
+    unit_ids = set()
+    packaging_ids = set()
+
+    for variant in variant_map.values():
+
+        unit_id = variant.get(
+            "unit_id"
+        )
+
+        packaging_type_id = variant.get(
+            "packaging_type_id"
+        )
+
+        if unit_id:
+            unit_ids.add(
+                unit_id
+            )
+
+        if packaging_type_id:
+            packaging_ids.add(
+                packaging_type_id
+            )
+
+    # =====================================================
+    # UNIT MAP
+    # =====================================================
+
+    unit_map = {}
+
+    if unit_ids:
+
+        units = list(
+            product_units_collection.find({
+                "_id": {
+                    "$in": list(unit_ids)
+                }
+            })
+        )
+
+        unit_map = {
+            unit["_id"]: unit
+            for unit in units
+        }
+
+    # =====================================================
+    # PACKAGING MAP
+    # =====================================================
+
+    packaging_map = {}
+
+    if packaging_ids:
+
+        packaging_types = list(
+            packing_types_collection.find({
+                "_id": {
+                    "$in": list(packaging_ids)
+                }
+            })
+        )
+
+        packaging_map = {
+            packaging["_id"]: packaging
+            for packaging in packaging_types
+        }
+
+    # =====================================================
+    # BUILD RESPONSE
+    # =====================================================
+
+    data = []
+
+    for row in inventory_rows:
+
+        product_id_value = row.get(
+            "product_id"
+        )
+
+        variant_id_value = row.get(
+            "variant_id"
+        )
+
+        product = product_map.get(
+            product_id_value,
+            {}
+        )
+
+        variant = variant_map.get(
+            variant_id_value,
+            {}
+        )
+
+        # =================================================
+        # UNIT
+        # =================================================
+
+        unit = ""
+
+        unit_id = variant.get(
+            "unit_id"
+        )
+
+        if unit_id:
+
+            unit_data = unit_map.get(
+                unit_id,
+                {}
+            )
+
+            unit = (
+                unit_data.get(
+                    "symbol"
+                )
+                or ""
+            )
+
+        # =================================================
+        # PACKAGE
+        # =================================================
+
+        package = ""
+
+        packaging_type_id = variant.get(
+            "packaging_type_id"
+        )
+
+        if packaging_type_id:
+
+            package_data = packaging_map.get(
+                packaging_type_id,
+                {}
+            )
+
+            package = (
+                package_data.get(
+                    "name"
+                )
+                or ""
+            )
+
+        # =================================================
+        # RESPONSE
+        # =================================================
+
+        data.append({
+
+            "purchase_order_id":
+                str(
+                    row.get(
+                        "purchase_order_id"
+                    )
+                ),
+
+            "purchase_item_id":
+                str(
+                    row.get(
+                        "purchase_item_id"
+                    )
+                ),
+
+            "invoice_no":
+                row.get(
+                    "invoice_no"
+                ),
+
+            "purchase_date":
+                row.get(
+                    "purchase_date"
+                ),
+
+            "warehouse_id":
+                str(
+                    row.get(
+                        "warehouse_id"
+                    )
+                )
+                if row.get("warehouse_id")
+                else None,
+
+            "product_id":
+                str(
+                    product_id_value
+                )
+                if product_id_value
+                else None,
+
+            "product_name":
+                product.get(
+                    "name"
+                ),
+
+            "variant_id":
+                str(
+                    variant_id_value
+                )
+                if variant_id_value
+                else None,
+
+            "variant_name":
+                variant.get(
+                    "name"
+                ),
+
+            "variant_qty":
+                variant.get(
+                    "quantity"
+                ),
+
+            "sku":
+                variant.get(
+                    "sku"
+                ),
+
+            "unit":
+                unit,
+
+            "package":
+                package,
+
+            # ---------------------------------------------
+            # BATCH DETAILS
+            # ---------------------------------------------
+
+            "purchase_rate":
+                row.get(
+                    "purchase_rate",
+                    0
+                ),
+
+            "purchase_quantity":
+                row.get(
+                    "purchase_quantity",
+                    0
+                ),
+
+            "sold_quantity":
+                row.get(
+                    "sold_quantity",
+                    0
+                ),
+
+            "returned_quantity":
+                row.get(
+                    "returned_quantity",
+                    0
+                ),
+
+            # ---------------------------------------------
+            # CURRENT BATCH STOCK
+            # ---------------------------------------------
+
+            "available_quantity":
+                row.get(
+                    "available_quantity",
+                    0
+                ),
+
+            "remaining_value":
+                row.get(
+                    "remaining_value",
+                    0
+                )
+        })
+
+    # =====================================================
+    # SEARCH
+    # =====================================================
+
+    if search:
+
+        search_lower = search.strip().lower()
+
+        data = [
+
+            item
+
+            for item in data
+
+            if (
+
+                search_lower
+                in str(
+                    item.get(
+                        "invoice_no"
+                    )
+                    or ""
+                ).lower()
+
+                or
+
+                search_lower
+                in str(
+                    item.get(
+                        "product_name"
+                    )
+                    or ""
+                ).lower()
+
+                or
+
+                search_lower
+                in str(
+                    item.get(
+                        "variant_name"
+                    )
+                    or ""
+                ).lower()
+
+                or
+
+                search_lower
+                in str(
+                    item.get(
+                        "sku"
+                    )
+                    or ""
+                ).lower()
+
+                or
+
+                search_lower
+                in str(
+                    item.get(
+                        "unit"
+                    )
+                    or ""
+                ).lower()
+
+                or
+
+                search_lower
+                in str(
+                    item.get(
+                        "package"
+                    )
+                    or ""
+                ).lower()
+            )
+        ]
+
+    # =====================================================
+    # SORT
+    # =====================================================
+
+    data.sort(
+        key=lambda x: (
+            x.get(
+                "product_name"
+            )
+            or "",
+
+            x.get(
+                "variant_name"
+            )
+            or "",
+
+            x.get(
+                "purchase_date"
+            )
+            or ""
+        )
+    )
+
+    # =====================================================
+    # PAGINATION
+    # =====================================================
+
+    total = len(data)
+
+    total_pages = (
+        (
+            total
+            + limit
+            - 1
+        )
+        //
+        limit
+    )
+
+    data = data[
+        skip:
+        skip + limit
+    ]
 
     # =====================================================
     # RESPONSE
