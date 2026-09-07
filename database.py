@@ -28,6 +28,10 @@ whatsapp_chats_collection = db["whatsapp_chats"]
 whatsapp_messages_collection = db["whatsapp_messages"]
 beats_collection = db["beats"]
 
+groups_collection = db["accounting_groups"]
+subgroups_collection = db["accounting_subgroups"]
+ledgers_collection = db["accounting_ledgers"]
+
 
 
 # =========================================================
