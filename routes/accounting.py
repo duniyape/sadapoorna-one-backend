@@ -12,10 +12,24 @@ router = APIRouter()
 
 
 def serialize_doc(doc):
-    if not doc:
+    if doc is None:
         return None
 
-    doc["_id"] = str(doc["_id"])
+    if isinstance(doc, ObjectId):
+        return str(doc)
+
+    if isinstance(doc, dict):
+        return {
+            key: serialize_doc(value)
+            for key, value in doc.items()
+        }
+
+    if isinstance(doc, list):
+        return [
+            serialize_doc(item)
+            for item in doc
+        ]
+
     return doc
 
 
@@ -100,10 +114,10 @@ class LedgerUpdate(BaseModel):
 # =========================================================
 
 @router.post("/groups")
-async def create_group(data: GroupCreate):
+def create_group(data: GroupCreate):
 
     # Duplicate check
-    existing = await groups_collection.find_one({
+    existing = groups_collection.find_one({
         "group_name": data.group_name.strip()
     })
 
@@ -124,7 +138,7 @@ async def create_group(data: GroupCreate):
         "updated_at": now
     }
 
-    result = await groups_collection.insert_one(group)
+    result = groups_collection.insert_one(group)
 
     return {
         "success": True,
@@ -134,7 +148,7 @@ async def create_group(data: GroupCreate):
 
 
 @router.get("/groups")
-async def get_groups(
+def get_groups(
     group_type: Optional[str] = None,
     status: Optional[str] = None
 ):
@@ -153,7 +167,7 @@ async def get_groups(
 
     groups = []
 
-    async for group in cursor:
+    for group in cursor:
         groups.append(serialize_doc(group))
 
     return {
@@ -164,9 +178,9 @@ async def get_groups(
 
 
 @router.get("/groups/{group_id}")
-async def get_group(group_id: str):
+def get_group(group_id: str):
 
-    group = await groups_collection.find_one({
+    group = groups_collection.find_one({
         "_id": object_id(group_id)
     })
 
@@ -183,14 +197,14 @@ async def get_group(group_id: str):
 
 
 @router.put("/groups/{group_id}")
-async def update_group(
+def update_group(
     group_id: str,
     data: GroupUpdate
 ):
 
     gid = object_id(group_id)
 
-    group = await groups_collection.find_one({
+    group = groups_collection.find_one({
         "_id": gid
     })
 
@@ -207,7 +221,7 @@ async def update_group(
     }
 
     if "group_name" in update_data:
-        duplicate = await groups_collection.find_one({
+        duplicate = groups_collection.find_one({
             "group_name": update_data["group_name"].strip(),
             "_id": {"$ne": gid}
         })
@@ -224,7 +238,7 @@ async def update_group(
 
     update_data["updated_at"] = datetime.now(timezone.utc)
 
-    await groups_collection.update_one(
+    groups_collection.update_one(
         {"_id": gid},
         {"$set": update_data}
     )
@@ -236,11 +250,11 @@ async def update_group(
 
 
 @router.delete("/groups/{group_id}")
-async def delete_group(group_id: str):
+def delete_group(group_id: str):
 
     gid = object_id(group_id)
 
-    group = await groups_collection.find_one({
+    group = groups_collection.find_one({
         "_id": gid
     })
 
@@ -251,7 +265,7 @@ async def delete_group(group_id: str):
         )
 
     # Don't delete if subgroups exist
-    subgroup_count = await subgroups_collection.count_documents({
+    subgroup_count = subgroups_collection.count_documents({
         "group_id": gid
     })
 
@@ -262,7 +276,7 @@ async def delete_group(group_id: str):
         )
 
     # Don't delete if ledgers exist
-    ledger_count = await ledgers_collection.count_documents({
+    ledger_count = ledgers_collection.count_documents({
         "group_id": gid
     })
 
@@ -272,7 +286,7 @@ async def delete_group(group_id: str):
             detail="Cannot delete group. Ledgers exist under this group."
         )
 
-    await groups_collection.delete_one({
+    groups_collection.delete_one({
         "_id": gid
     })
 
@@ -287,12 +301,12 @@ async def delete_group(group_id: str):
 # =========================================================
 
 @router.post("/subgroups")
-async def create_subgroup(data: SubgroupCreate):
+def create_subgroup(data: SubgroupCreate):
 
     gid = object_id(data.group_id)
 
     # Check parent group
-    group = await groups_collection.find_one({
+    group = groups_collection.find_one({
         "_id": gid
     })
 
@@ -303,7 +317,7 @@ async def create_subgroup(data: SubgroupCreate):
         )
 
     # Duplicate subgroup inside same group
-    existing = await subgroups_collection.find_one({
+    existing = subgroups_collection.find_one({
         "group_id": gid,
         "subgroup_name": data.subgroup_name.strip()
     })
@@ -327,7 +341,7 @@ async def create_subgroup(data: SubgroupCreate):
         "updated_at": now
     }
 
-    result = await subgroups_collection.insert_one(subgroup)
+    result = subgroups_collection.insert_one(subgroup)
 
     return {
         "success": True,
@@ -337,7 +351,7 @@ async def create_subgroup(data: SubgroupCreate):
 
 
 @router.get("/subgroups")
-async def get_subgroups(
+def get_subgroups(
     group_id: Optional[str] = None,
     status: Optional[str] = None
 ):
@@ -356,7 +370,7 @@ async def get_subgroups(
 
     subgroups = []
 
-    async for subgroup in cursor:
+    for subgroup in cursor:
         subgroups.append(
             serialize_doc(subgroup)
         )
@@ -369,9 +383,9 @@ async def get_subgroups(
 
 
 @router.get("/subgroups/{subgroup_id}")
-async def get_subgroup(subgroup_id: str):
+def get_subgroup(subgroup_id: str):
 
-    subgroup = await subgroups_collection.find_one({
+    subgroup = subgroups_collection.find_one({
         "_id": object_id(subgroup_id)
     })
 
@@ -388,14 +402,14 @@ async def get_subgroup(subgroup_id: str):
 
 
 @router.put("/subgroups/{subgroup_id}")
-async def update_subgroup(
+def update_subgroup(
     subgroup_id: str,
     data: SubgroupUpdate
 ):
 
     sid = object_id(subgroup_id)
 
-    subgroup = await subgroups_collection.find_one({
+    subgroup = subgroups_collection.find_one({
         "_id": sid
     })
 
@@ -418,7 +432,7 @@ async def update_subgroup(
             update_data["group_id"]
         )
 
-        group = await groups_collection.find_one({
+        group = groups_collection.find_one({
             "_id": new_gid
         })
 
@@ -439,7 +453,7 @@ async def update_subgroup(
 
         name = update_data["subgroup_name"].strip()
 
-        duplicate = await subgroups_collection.find_one({
+        duplicate = subgroups_collection.find_one({
             "group_id": new_gid,
             "subgroup_name": name,
             "_id": {"$ne": sid}
@@ -455,7 +469,7 @@ async def update_subgroup(
 
     update_data["updated_at"] = datetime.now(timezone.utc)
 
-    await subgroups_collection.update_one(
+    subgroups_collection.update_one(
         {"_id": sid},
         {"$set": update_data}
     )
@@ -467,11 +481,11 @@ async def update_subgroup(
 
 
 @router.delete("/subgroups/{subgroup_id}")
-async def delete_subgroup(subgroup_id: str):
+def delete_subgroup(subgroup_id: str):
 
     sid = object_id(subgroup_id)
 
-    subgroup = await subgroups_collection.find_one({
+    subgroup = subgroups_collection.find_one({
         "_id": sid
     })
 
@@ -481,7 +495,7 @@ async def delete_subgroup(subgroup_id: str):
             detail="Subgroup not found"
         )
 
-    ledger_count = await ledgers_collection.count_documents({
+    ledger_count = ledgers_collection.count_documents({
         "subgroup_id": sid
     })
 
@@ -491,7 +505,7 @@ async def delete_subgroup(subgroup_id: str):
             detail="Cannot delete subgroup. Ledgers exist under this subgroup."
         )
 
-    await subgroups_collection.delete_one({
+    subgroups_collection.delete_one({
         "_id": sid
     })
 
@@ -506,12 +520,12 @@ async def delete_subgroup(subgroup_id: str):
 # =========================================================
 
 @router.post("/ledgers")
-async def create_ledger(data: LedgerCreate):
+def create_ledger(data: LedgerCreate):
 
     gid = object_id(data.group_id)
 
     # Check group
-    group = await groups_collection.find_one({
+    group = groups_collection.find_one({
         "_id": gid
     })
 
@@ -527,7 +541,7 @@ async def create_ledger(data: LedgerCreate):
 
         sid = object_id(data.subgroup_id)
 
-        subgroup = await subgroups_collection.find_one({
+        subgroup = subgroups_collection.find_one({
             "_id": sid,
             "group_id": gid
         })
@@ -549,7 +563,7 @@ async def create_ledger(data: LedgerCreate):
             data.subgroup_id
         )
 
-    existing = await ledgers_collection.find_one(
+    existing = ledgers_collection.find_one(
         duplicate_query
     )
 
@@ -590,7 +604,7 @@ async def create_ledger(data: LedgerCreate):
         "updated_at": now
     }
 
-    result = await ledgers_collection.insert_one(
+    result = ledgers_collection.insert_one(
         ledger
     )
 
@@ -602,7 +616,7 @@ async def create_ledger(data: LedgerCreate):
 
 
 @router.get("/ledgers")
-async def get_ledgers(
+def get_ledgers(
     group_id: Optional[str] = None,
     subgroup_id: Optional[str] = None,
     status: Optional[str] = None
@@ -627,7 +641,7 @@ async def get_ledgers(
 
     ledgers = []
 
-    async for ledger in cursor:
+    for ledger in cursor:
         ledgers.append(
             serialize_doc(ledger)
         )
@@ -640,9 +654,9 @@ async def get_ledgers(
 
 
 @router.get("/ledgers/{ledger_id}")
-async def get_ledger(ledger_id: str):
+def get_ledger(ledger_id: str):
 
-    ledger = await ledgers_collection.find_one({
+    ledger = ledgers_collection.find_one({
         "_id": object_id(ledger_id)
     })
 
@@ -659,14 +673,14 @@ async def get_ledger(ledger_id: str):
 
 
 @router.put("/ledgers/{ledger_id}")
-async def update_ledger(
+def update_ledger(
     ledger_id: str,
     data: LedgerUpdate
 ):
 
     lid = object_id(ledger_id)
 
-    ledger = await ledgers_collection.find_one({
+    ledger = ledgers_collection.find_one({
         "_id": lid
     })
 
@@ -692,7 +706,7 @@ async def update_ledger(
             update_data["group_id"]
         )
 
-        group = await groups_collection.find_one({
+        group = groups_collection.find_one({
             "_id": gid
         })
 
@@ -721,7 +735,7 @@ async def update_ledger(
                 update_data["subgroup_id"]
             )
 
-            subgroup = await subgroups_collection.find_one({
+            subgroup = subgroups_collection.find_one({
                 "_id": sid,
                 "group_id": gid
             })
@@ -760,7 +774,7 @@ async def update_ledger(
                 update_data["subgroup_id"]
             )
 
-        duplicate = await ledgers_collection.find_one(
+        duplicate = ledgers_collection.find_one(
             duplicate_query
         )
 
@@ -774,7 +788,7 @@ async def update_ledger(
 
     update_data["updated_at"] = datetime.now(timezone.utc)
 
-    await ledgers_collection.update_one(
+    ledgers_collection.update_one(
         {"_id": lid},
         {"$set": update_data}
     )
@@ -786,11 +800,11 @@ async def update_ledger(
 
 
 @router.delete("/ledgers/{ledger_id}")
-async def delete_ledger(ledger_id: str):
+def delete_ledger(ledger_id: str):
 
     lid = object_id(ledger_id)
 
-    ledger = await ledgers_collection.find_one({
+    ledger = ledgers_collection.find_one({
         "_id": lid
     })
 
@@ -800,7 +814,7 @@ async def delete_ledger(ledger_id: str):
             detail="Ledger not found"
         )
 
-    await ledgers_collection.delete_one({
+    ledgers_collection.delete_one({
         "_id": lid
     })
 

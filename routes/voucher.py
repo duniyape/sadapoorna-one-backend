@@ -233,7 +233,7 @@ def get_voucher_prefix(
 # GENERATE VOUCHER NUMBER
 # =========================================================
 
-async def generate_voucher_number(
+def generate_voucher_number(
     voucher_type: str,
     voucher_mode: Optional[str],
     voucher_date: datetime
@@ -267,7 +267,7 @@ async def generate_voucher_number(
     ]:
         query["voucher_mode"] = voucher_mode
 
-    last_voucher = await vouchers_collection.find_one(
+    last_voucher = vouchers_collection.find_one(
         query,
         sort=[
             ("txn", -1)
@@ -303,7 +303,7 @@ async def generate_voucher_number(
 # =========================================================
 
 @router.post("/")
-async def create_voucher(
+def create_voucher(
     data: VoucherCreate,
     current_user=Depends(get_current_user)
 ):
@@ -406,7 +406,7 @@ async def create_voucher(
             entry.ledger_id
         )
 
-        ledger = await ledgers_collection.find_one({
+        ledger = ledgers_collection.find_one({
             "_id": ledger_oid
         })
 
@@ -544,7 +544,7 @@ async def create_voucher(
     # =====================================================
 
     voucher_number, txn = (
-        await generate_voucher_number(
+        generate_voucher_number(
             voucher_type=data.voucher_type,
             voucher_mode=data.voucher_mode,
             voucher_date=voucher_date
@@ -594,7 +594,7 @@ async def create_voucher(
     # INSERT
     # =====================================================
 
-    result = await vouchers_collection.insert_one(
+    result = vouchers_collection.insert_one(
         voucher
     )
 
@@ -639,7 +639,7 @@ async def create_voucher(
 # =========================================================
 
 @router.get("/")
-async def get_vouchers(
+def get_vouchers(
     voucher_type: Optional[str] = None,
     voucher_mode: Optional[str] = None,
     from_date: Optional[str] = None,
@@ -701,7 +701,7 @@ async def get_vouchers(
 
     vouchers = []
 
-    async for voucher in cursor:
+    for voucher in cursor:
 
         vouchers.append(
             serialize_doc(voucher)
@@ -722,7 +722,7 @@ async def get_vouchers(
 # =========================================================
 
 @router.get("/{voucher_id}")
-async def get_voucher(
+def get_voucher(
     voucher_id: str
 ):
 
@@ -730,7 +730,7 @@ async def get_voucher(
         voucher_id
     )
 
-    voucher = await vouchers_collection.find_one({
+    voucher = vouchers_collection.find_one({
         "_id": voucher_oid
     })
 
@@ -756,7 +756,7 @@ async def get_voucher(
 # =========================================================
 
 @router.delete("/{voucher_id}")
-async def delete_voucher(
+def delete_voucher(
     voucher_id: str,
     current_user=Depends(get_current_user)
 ):
@@ -770,7 +770,7 @@ async def delete_voucher(
         voucher_id
     )
 
-    voucher = await vouchers_collection.find_one({
+    voucher = vouchers_collection.find_one({
         "_id": voucher_oid
     })
 
@@ -785,7 +785,7 @@ async def delete_voucher(
     # Delete
     # -----------------------------------------------------
 
-    result = await vouchers_collection.delete_one({
+    result = vouchers_collection.delete_one({
         "_id": voucher_oid
     })
 
