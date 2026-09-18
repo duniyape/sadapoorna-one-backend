@@ -48,6 +48,30 @@ def generate_batch_no() -> str:
     return f"BAT-{year}-{month}-{counter['seq']:05d}"
 
 
+def generate_manifest_no() -> str:
+    """Generate a unique sequential trip manifest number: MNF-YYYY-MM-00001."""
+    now = utc_now()
+    year = now.strftime("%Y")
+    month = now.strftime("%m")
+    counter_id = f"manifest_no:{year}:{month}"
+
+    counter = counters_collection.find_one_and_update(
+        {"_id": counter_id},
+        {
+            "$inc": {"seq": 1},
+            "$set": {
+                "prefix": "MNF",
+                "year": int(year),
+                "month": int(month),
+                "updated_at": now,
+            },
+        },
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    return f"MNF-{year}-{month}-{counter['seq']:05d}"
+
+
 # =========================================================
 # 1. PURCHASE INWARD: CREATE STOCK BATCHES
 # =========================================================
@@ -599,6 +623,8 @@ def transfer_stock_batches(
     transfer_order_id: Optional[ObjectId] = None,
     user_id: Optional[str] = None,
     allocation_type: Optional[str] = None,
+    manifest_id: Optional[ObjectId] = None,
+    manifest_no: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Executes an atomic transfer of stock batches from a source location to a destination location.
@@ -612,6 +638,15 @@ def transfer_stock_batches(
     """
     allocations = []
     now = utc_now()
+
+    if isinstance(source_id, str) and ObjectId.is_valid(source_id):
+        source_id = ObjectId(source_id)
+    if isinstance(dest_id, str) and ObjectId.is_valid(dest_id):
+        dest_id = ObjectId(dest_id)
+    if isinstance(manifest_id, str) and ObjectId.is_valid(manifest_id):
+        manifest_id = ObjectId(manifest_id)
+    if isinstance(transfer_order_id, str) and ObjectId.is_valid(transfer_order_id):
+        transfer_order_id = ObjectId(transfer_order_id)
 
     # Determine allocation type if not explicitly supplied
     if not allocation_type:
@@ -629,6 +664,10 @@ def transfer_stock_batches(
     for item in items:
         product_id = item.get("product_id")
         variant_id = item.get("variant_id")
+        if isinstance(product_id, str) and ObjectId.is_valid(product_id):
+            product_id = ObjectId(product_id)
+        if isinstance(variant_id, str) and ObjectId.is_valid(variant_id):
+            variant_id = ObjectId(variant_id)
         req_qty = float(item.get("quantity", 0))
 
         if req_qty <= 0:
@@ -673,7 +712,10 @@ def transfer_stock_batches(
                 stock_batches_collection.update_one(
                     {"_id": existing_dest_batch["_id"]},
                     {
-                        "$inc": {"available_quantity": c_qty},
+                        "$inc": {
+                            "initial_quantity": c_qty,
+                            "available_quantity": c_qty,
+                        },
                         "$set": {
                             "status": "active",
                             "updated_at": now,
@@ -708,6 +750,8 @@ def transfer_stock_batches(
             allocation_doc = {
                 "allocation_type": allocation_type,
                 "transfer_order_id": transfer_order_id,
+                "manifest_id": manifest_id,
+                "manifest_no": manifest_no,
                 "source_batch_id": src_batch_id,
                 "destination_batch_id": dest_batch_id,
                 "batch_no": batch_no,
@@ -826,45 +870,113 @@ BLOCKING_SALE_STATUSES = [
 ]
 
 
-def get_bulk_blocked_quantities(
+def get_blocked_sale_orders_query(
     warehouse_id: Optional[ObjectId] = None,
     vehicle_id: Optional[ObjectId] = None,
-) -> Dict[Tuple[Any, Any], float]:
+    location_type: Optional[str] = None,
+) -> Dict[str, Any]:
     """
-    Computes committed/blocked quantities across all active open orders
-    for a given warehouse or vehicle in a single fast indexed aggregation.
-    Returns mapping of (product_id, variant_id) -> blocked_quantity.
+    Returns the MongoDB filter matching all active sale orders that block sellable inventory:
+    1. Orders in pipeline statuses: Pending, Ready to Pick-up, Out for Delivery
+    2. Orders marked Delivered that have NOT been billed yet (invoice_no is None or "")
+
+    Location-awareness:
+    - For warehouse inventory: only block orders that are still at the warehouse (vehicle_id is None).
+      Orders dispatched or loaded on a vehicle (vehicle_id set) belong to the vehicle, not the warehouse!
+    - For vehicle inventory: only block orders assigned to vehicles (vehicle_id is not None).
     """
     match_query: Dict[str, Any] = {
         "type": "sale",
         "record_status": "active",
-        "status": {"$in": BLOCKING_SALE_STATUSES},
+        "$or": [
+            {
+                "status": {"$in": BLOCKING_SALE_STATUSES}
+            },
+            {
+                "status": "Delivered",
+                "invoice_no": {"$in": [None, ""]}
+            }
+        ]
     }
-    if warehouse_id:
-        match_query["warehouse_id"] = warehouse_id
-    elif vehicle_id:
-        match_query["vehicle_id"] = vehicle_id
+
+    loc_type = location_type or ("warehouse" if warehouse_id else "vehicle" if vehicle_id else None)
+
+    if loc_type == "warehouse":
+        if warehouse_id:
+            match_query["warehouse_id"] = warehouse_id
+        # Warehouse blocked stock must ONLY include orders still physically at the warehouse (NOT on a vehicle)
+        match_query["vehicle_id"] = None
+    elif loc_type == "vehicle":
+        if vehicle_id:
+            match_query["vehicle_id"] = vehicle_id
+        else:
+            # Vehicle blocked stock must only include orders assigned to a vehicle
+            match_query["vehicle_id"] = {"$ne": None}
+
+    return match_query
+
+
+def get_bulk_blocked_quantities(
+    warehouse_id: Optional[ObjectId] = None,
+    vehicle_id: Optional[ObjectId] = None,
+    location_type: Optional[str] = None,
+    group_by_location: bool = False,
+) -> Dict[Tuple[Any, ...], float]:
+    """
+    Computes committed/blocked quantities across all active open orders
+    for a given warehouse or vehicle in a single fast indexed aggregation.
+    - If group_by_location is True:
+      returns (location_id, product_id, variant_id) -> blocked_quantity
+    - If group_by_location is False:
+      returns (product_id, variant_id) -> blocked_quantity
+    """
+    loc_type = location_type or ("warehouse" if warehouse_id else "vehicle" if vehicle_id else None)
+
+    match_query = get_blocked_sale_orders_query(
+        warehouse_id=warehouse_id,
+        vehicle_id=vehicle_id,
+        location_type=loc_type,
+    )
+
+    group_id: Dict[str, Any] = {
+        "product_id": "$items.product_id",
+        "variant_id": "$items.variant_id",
+    }
+    if group_by_location:
+        if loc_type == "vehicle":
+            group_id["vehicle_id"] = "$vehicle_id"
+        else:
+            group_id["warehouse_id"] = "$warehouse_id"
 
     pipeline = [
         {"$match": match_query},
         {"$unwind": "$items"},
         {
             "$group": {
-                "_id": {
-                    "product_id": "$items.product_id",
-                    "variant_id": "$items.variant_id",
-                },
+                "_id": group_id,
                 "blocked_quantity": {"$sum": "$items.quantity"},
             }
         },
     ]
 
-    blocked_map: Dict[Tuple[Any, Any], float] = {}
+    blocked_map: Dict[Tuple[Any, ...], float] = {}
     for row in orders_collection.aggregate(pipeline):
         pid = row["_id"].get("product_id")
         vid = row["_id"].get("variant_id")
-        if pid and vid:
-            blocked_map[(pid, vid)] = float(row.get("blocked_quantity", 0))
+        qty = float(row.get("blocked_quantity", 0))
+
+        if not (pid and vid):
+            continue
+
+        if group_by_location:
+            if loc_type == "vehicle":
+                loc_id = row["_id"].get("vehicle_id") or vehicle_id
+            else:
+                loc_id = row["_id"].get("warehouse_id") or warehouse_id
+            if loc_id:
+                blocked_map[(loc_id, pid, vid)] = qty
+        else:
+            blocked_map[(pid, vid)] = blocked_map.get((pid, vid), 0.0) + qty
 
     return blocked_map
 
@@ -878,7 +990,7 @@ def get_sellable_stock_breakdown(
     """
     Calculates the exact real-time stock breakdown for a specific product variant:
     - physical_stock: On-shelf stock from active stock_batches
-    - blocked_stock: Committed in Pending / Ready to Pick-up / Out for Delivery sale orders
+    - blocked_stock: Committed in Pending / Ready to Pick-up / Out for Delivery / unbilled Delivered sale orders
     - unblocked_stock: max(0, physical_stock - blocked_stock)
     """
     # 1. Physical stock from active batches
@@ -902,16 +1014,11 @@ def get_sellable_stock_breakdown(
     phys_res = list(stock_batches_collection.aggregate(phys_pipeline))
     physical_stock = float(phys_res[0]["total"]) if phys_res else 0.0
 
-    # 2. Blocked stock in pipeline
-    order_match: Dict[str, Any] = {
-        "type": "sale",
-        "record_status": "active",
-        "status": {"$in": BLOCKING_SALE_STATUSES},
-    }
-    if warehouse_id:
-        order_match["warehouse_id"] = warehouse_id
-    elif vehicle_id:
-        order_match["vehicle_id"] = vehicle_id
+    # 2. Blocked stock in pipeline and unbilled Delivered sales
+    order_match = get_blocked_sale_orders_query(
+        warehouse_id=warehouse_id,
+        vehicle_id=vehicle_id
+    )
 
     blocked_pipeline = [
         {"$match": order_match},

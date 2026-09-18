@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel, Field
-from typing import Optional, List, Literal
+from pydantic import BaseModel, Field, field_validator
+from typing import Optional, List, Literal, Union
 from datetime import datetime, timezone
 from bson import ObjectId
 
@@ -53,10 +53,19 @@ class VoucherCreate(BaseModel):
         "Payment",
         "Receipt",
         "Journal",
-        "Contra"
+        "Contra",
+        "Sales",
+        "Sales Return",
+        "Credit Note"
     ]
 
     voucher_mode: Optional[str] = None
+
+    order_id: Optional[str] = None
+
+    invoice_no: Optional[str] = None
+
+    customer_id: Optional[str] = None
 
     date: datetime
 
@@ -70,16 +79,81 @@ class VoucherCreate(BaseModel):
     entries: List[VoucherEntry]
 
 
+class VoucherVerifyRequest(BaseModel):
+    bank_clearance_date: Optional[datetime] = None
+    notes: Optional[str] = None
+
+
+class VoucherBounceRequest(BaseModel):
+    bounce_reason: str = Field(..., min_length=3)
+    penalty_amount: Optional[float] = Field(default=0.0, ge=0)
+
+
+class ChequeReceiveRequest(BaseModel):
+    notes: Optional[str] = None
+
+
+class ChequeDepositRequest(BaseModel):
+    deposit_bank_name: Optional[str] = None
+    deposit_date: Optional[datetime] = None
+    deposit_slip_ref: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class BatchFinanceDisburseRequest(BaseModel):
+    voucher_ids: List[str] = Field(..., min_length=1)
+    disbursement_bank_name: Optional[str] = None
+    bank_clearance_date: Optional[Union[datetime, str]] = None
+    total_subvention_charges: Optional[float] = Field(default=0.0, ge=0)
+    disbursement_utr: Optional[str] = None
+    notes: Optional[str] = None
+
+    @field_validator("bank_clearance_date", mode="before")
+    @classmethod
+    def normalize_dates(cls, v):
+        if not v or not str(v).strip():
+            return None
+        if isinstance(v, datetime):
+            return v
+        s = str(v).strip()
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except Exception:
+            for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%d-%m-%Y"):
+                try:
+                    return datetime.strptime(s, fmt)
+                except Exception:
+                    pass
+        return None
+
+
+
+
 # =========================================================
 # HELPER
 # =========================================================
 
 def serialize_doc(doc):
-
-    if not doc:
+    if doc is None:
         return None
 
-    doc["_id"] = str(doc["_id"])
+    if isinstance(doc, ObjectId):
+        return str(doc)
+
+    if isinstance(doc, datetime):
+        return doc
+
+    if isinstance(doc, dict):
+        return {
+            key: serialize_doc(value)
+            for key, value in doc.items()
+        }
+
+    if isinstance(doc, (list, tuple, set)):
+        return [
+            serialize_doc(item)
+            for item in doc
+        ]
 
     return doc
 
@@ -226,6 +300,26 @@ def get_voucher_prefix(
     if voucher_type == "Contra":
         return "CTV"
 
+    # -----------------------------------------------------
+    # SALES
+    # -----------------------------------------------------
+
+    if voucher_type == "Sales":
+        return "SV"
+
+    # -----------------------------------------------------
+    # SALES RETURN / CREDIT NOTE
+    # -----------------------------------------------------
+
+    if voucher_type in [
+        "Sales Return",
+        "Sales_Return",
+        "Sale Return",
+        "Credit Note",
+        "Credit_Note",
+    ]:
+        return "SRV"
+
     return voucher_type.upper()
 
 
@@ -303,6 +397,7 @@ def generate_voucher_number(
 # =========================================================
 
 @router.post("/")
+@router.post("", include_in_schema=False)
 def create_voucher(
     data: VoucherCreate,
     current_user=Depends(get_current_user)
@@ -583,6 +678,12 @@ def create_voucher(
 
         "entries": clean_entries,
 
+        "order_id": get_object_id(data.order_id) if data.order_id else None,
+
+        "invoice_no": data.invoice_no,
+
+        "customer_id": get_object_id(data.customer_id) if data.customer_id else None,
+
         # From authentication token
         "created_by": created_by,
 
@@ -639,9 +740,11 @@ def create_voucher(
 # =========================================================
 
 @router.get("/")
+@router.get("", include_in_schema=False)
 def get_vouchers(
     voucher_type: Optional[str] = None,
     voucher_mode: Optional[str] = None,
+    verification_status: Optional[str] = None,
     from_date: Optional[str] = None,
     to_date: Optional[str] = None
 ):
@@ -666,6 +769,16 @@ def get_vouchers(
 
         query["voucher_mode"] = (
             voucher_mode.strip().title()
+        )
+
+    # -----------------------------------------------------
+    # Verification Status (PENDING, VERIFIED, BOUNCED)
+    # -----------------------------------------------------
+
+    if verification_status:
+
+        query["verification_status"] = (
+            verification_status.strip().upper()
         )
 
     # -----------------------------------------------------
@@ -808,3 +921,168 @@ def delete_voucher(
 
         "deleted_by": created_by
     }
+
+
+# =========================================================
+# CHEQUE LIFECYCLE: RECEIVE IN OFFICE (PHYSICAL CUSTODY)
+# =========================================================
+
+@router.post("/{voucher_id}/receive-cheque")
+def receive_cheque_endpoint(
+    voucher_id: str,
+    data: Optional[ChequeReceiveRequest] = None,
+    current_user=Depends(get_current_user),
+):
+    user_id = get_token_user_id(current_user)
+    from services.accounting_service import receive_cheque_voucher
+
+    try:
+        updated = receive_cheque_voucher(
+            voucher_id=voucher_id,
+            user_id=user_id,
+            notes=data.notes if data else None,
+        )
+        return {
+            "success": True,
+            "message": "Physical cheque marked as RECEIVED in office safe",
+            "data": serialize_doc(updated),
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to receive cheque: {str(e)}")
+
+
+# =========================================================
+# CHEQUE LIFECYCLE: DEPOSIT IN BANK (CTS CLEARING)
+# =========================================================
+
+@router.post("/{voucher_id}/deposit-cheque")
+def deposit_cheque_endpoint(
+    voucher_id: str,
+    data: Optional[ChequeDepositRequest] = None,
+    current_user=Depends(get_current_user),
+):
+    user_id = get_token_user_id(current_user)
+    from services.accounting_service import deposit_cheque_voucher
+
+    try:
+        updated = deposit_cheque_voucher(
+            voucher_id=voucher_id,
+            user_id=user_id,
+            deposit_bank_account_name=data.deposit_bank_name if data else None,
+            deposit_date=data.deposit_date if data else None,
+            deposit_slip_ref=data.deposit_slip_ref if data else None,
+            notes=data.notes if data else None,
+        )
+        return {
+            "success": True,
+            "message": "Cheque marked as DEPOSITED in bank. Awaiting CTS clearance.",
+            "data": serialize_doc(updated),
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to deposit cheque: {str(e)}")
+
+
+# =========================================================
+# VERIFY RECEIPT VOUCHER (BANK RECONCILIATION / CLEARANCE)
+# =========================================================
+
+@router.post("/{voucher_id}/verify")
+def verify_voucher(
+    voucher_id: str,
+    data: Optional[VoucherVerifyRequest] = None,
+    current_user=Depends(get_current_user)
+):
+    user_id = get_token_user_id(current_user)
+    from services.accounting_service import verify_receipt_voucher
+
+    try:
+        updated = verify_receipt_voucher(
+            voucher_id=voucher_id,
+            user_id=user_id,
+            bank_clearance_date=data.bank_clearance_date if data else None,
+            notes=data.notes if data else None,
+        )
+        return {
+            "success": True,
+            "message": "Voucher verified successfully against bank records",
+            "data": serialize_doc(updated),
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to verify voucher: {str(e)}")
+
+
+# =========================================================
+# BOUNCE / DISHONOR RECEIPT VOUCHER (AUTO-REVERSAL)
+# =========================================================
+
+@router.post("/{voucher_id}/bounce")
+def bounce_voucher(
+    voucher_id: str,
+    data: VoucherBounceRequest,
+    current_user=Depends(get_current_user)
+):
+    user_id = get_token_user_id(current_user)
+    from services.accounting_service import bounce_receipt_voucher
+
+    try:
+        updated_voucher, reversal_voucher = bounce_receipt_voucher(
+            voucher_id=voucher_id,
+            user_id=user_id,
+            bounce_reason=data.bounce_reason,
+            penalty_amount=data.penalty_amount or 0.0,
+        )
+        return {
+            "success": True,
+            "message": "Receipt voucher marked as bounced. Accounting reversal entry created and order balance restored.",
+            "data": {
+                "voucher": serialize_doc(updated_voucher),
+                "reversal_voucher": serialize_doc(reversal_voucher),
+            }
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to bounce voucher: {str(e)}")
+
+
+# =========================================================
+# FINANCE LIFECYCLE: BATCH DISBURSE TO BANK
+# =========================================================
+
+@router.post("/batch-disburse-finance")
+def batch_disburse_finance_endpoint(
+    data: BatchFinanceDisburseRequest,
+    current_user=Depends(get_current_user),
+):
+    user_id = get_token_user_id(current_user)
+    from services.accounting_service import batch_disburse_finance_vouchers
+
+    try:
+        updated_vouchers, contra_doc, summary = batch_disburse_finance_vouchers(
+            voucher_ids=data.voucher_ids,
+            user_id=user_id,
+            disbursement_bank_name=data.disbursement_bank_name,
+            bank_clearance_date=data.bank_clearance_date,
+            total_subvention_charges=data.total_subvention_charges or 0.0,
+            disbursement_utr=data.disbursement_utr,
+            notes=data.notes,
+        )
+        return {
+            "success": True,
+            "message": f"Successfully settled {summary['batch_settled_count']} finance vouchers in batch. Master contra voucher {summary['clearance_contra_voucher_number']} created.",
+            "data": {
+                "contra_voucher": serialize_doc(contra_doc),
+                "summary": serialize_doc(summary),
+                "vouchers": serialize_doc(updated_vouchers),
+            }
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to batch disburse finance vouchers: {str(e)}")

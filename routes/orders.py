@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Query, Depends
 from fastapi.responses import StreamingResponse
-from typing import Optional, List
-from datetime import datetime, timezone
+from typing import Optional, List, Dict, Tuple, Any
+from datetime import datetime, timezone, timedelta
 from bson import ObjectId
 from zoneinfo import ZoneInfo
 import io
@@ -23,6 +23,7 @@ from database import (
     stock_batches_collection,
     stock_batch_allocations_collection,
     sale_batch_consumptions_collection,
+    delivery_manifests_collection,
 )
 
 from routes.auth import get_current_user
@@ -37,6 +38,7 @@ from schemas.order_schemas import (
     OrderStatusUpdate,
     RecordStatusUpdate,
     ManualBillingRequest,
+    BulkOrderDispatchRequest,
 )
 
 from services.batch_service import (
@@ -48,6 +50,7 @@ from services.batch_service import (
     transfer_stock_batches,
     sync_existing_purchases_to_batches,
     get_sellable_stock_breakdown,
+    generate_manifest_no,
 )
 from services.invoice_pdf_service import generate_invoice_pdf
 from services.whatsapp_service import send_invoice_template_whatsapp
@@ -102,8 +105,6 @@ def get_utc_date_range(from_date: Optional[str], to_date: Optional[str]):
         start_utc = start_date.replace(tzinfo=IST).astimezone(timezone.utc).replace(tzinfo=None)
         date_query["$gte"] = start_utc
     if end_date:
-        end_utc = (end_date.replace(tzinfo=IST) + datetime.resolution).astimezone(timezone.utc).replace(tzinfo=None)
-        from datetime import timedelta
         end_utc = (end_date.replace(tzinfo=IST) + timedelta(days=1)).astimezone(timezone.utc).replace(tzinfo=None)
         date_query["$lt"] = end_utc
     return date_query
@@ -165,10 +166,17 @@ def validate_vendor(vendor_id: Optional[str]) -> Optional[ObjectId]:
 def validate_customer(customer_id: Optional[str]) -> Optional[ObjectId]:
     if not customer_id:
         return None
-    obj_id = validate_object_id(customer_id, "customer_id")
-    if not customers_collection.find_one({"_id": obj_id}, {"_id": 1}):
+    cid_str = str(customer_id).strip()
+    cust = None
+    if ObjectId.is_valid(cid_str):
+        cust = customers_collection.find_one({"_id": ObjectId(cid_str)}, {"_id": 1})
+    if not cust:
+        cust = customers_collection.find_one({"id": cid_str}, {"_id": 1})
+    if not cust and cid_str.upper().startswith("CUST"):
+        cust = customers_collection.find_one({"id": cid_str.upper()}, {"_id": 1})
+    if not cust:
         raise HTTPException(status_code=404, detail=f"Customer not found: {customer_id}")
-    return obj_id
+    return cust["_id"]
 
 
 def validate_warehouse(warehouse_id: Optional[str]) -> Optional[ObjectId]:
@@ -499,6 +507,115 @@ def enrich_orders_with_references(orders: List[dict]) -> List[dict]:
 
 
 # =========================================================
+# HELPER: CREATE DELIVERY MANIFEST DOCUMENT
+# =========================================================
+
+def _create_delivery_manifest_document(
+    orders: List[Dict[str, Any]],
+    warehouse_id: Optional[ObjectId],
+    vehicle_id: Optional[ObjectId],
+    user_id: Optional[str] = None,
+    route_name: Optional[str] = None,
+    notes: Optional[str] = None,
+    status: str = "active",
+    manifest_id: Optional[ObjectId] = None,
+    manifest_no: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Creates and persists a Driver Loading Manifest (Trip Sheet) document
+    in delivery_manifests_collection.
+    """
+    now = utc_now()
+    if not manifest_id:
+        manifest_id = ObjectId()
+    if not manifest_no:
+        manifest_no = generate_manifest_no()
+
+    wh_doc = warehouses_collection.find_one({"_id": warehouse_id}) if warehouse_id else None
+    veh_doc = vehicles_collection.find_one({"_id": vehicle_id}) if vehicle_id else None
+
+    customer_stops = []
+    trip_demand: Dict[Tuple[ObjectId, ObjectId], float] = {}
+    obj_ids = []
+
+    for o in orders:
+        obj_ids.append(o["_id"])
+        cid = o.get("customer_id")
+        cust = None
+        if cid:
+            if isinstance(cid, str) and ObjectId.is_valid(cid):
+                cid = ObjectId(cid)
+            cust = customers_collection.find_one({"_id": cid})
+
+        customer_stops.append({
+            "order_id": str(o["_id"]),
+            "order_no": o.get("order_no"),
+            "customer_name": cust.get("name") if cust else "N/A",
+            "customer_phone": cust.get("phone") or cust.get("mobile") if cust else None,
+            "address": cust.get("address") or cust.get("shipping_address") or cust.get("billing_address") if cust else None,
+            "payment_mode": o.get("payment_mode"),
+            "grand_total": o.get("grand_total", 0.0),
+            "item_count": len(o.get("items", [])),
+        })
+
+        for it in o.get("items", []):
+            p_id = it.get("product_id")
+            v_id = it.get("variant_id")
+            if isinstance(p_id, str) and ObjectId.is_valid(p_id):
+                p_id = ObjectId(p_id)
+            if isinstance(v_id, str) and ObjectId.is_valid(v_id):
+                v_id = ObjectId(v_id)
+            qty = float(it.get("quantity", 0))
+            if p_id and v_id and qty > 0:
+                trip_demand[(p_id, v_id)] = trip_demand.get((p_id, v_id), 0.0) + qty
+
+    consolidated_items = []
+    for (p_id, v_id), total_qty in trip_demand.items():
+        prod = products_collection.find_one({"_id": p_id})
+        var = product_variants_collection.find_one({"_id": v_id})
+        consolidated_items.append({
+            "product_id": str(p_id),
+            "product_name": prod.get("name") if prod else str(p_id),
+            "variant_id": str(v_id),
+            "variant_name": var.get("name") if var else str(v_id),
+            "sku": var.get("sku") if var else "",
+            "total_quantity": round(total_qty, 4),
+        })
+
+    total_trip_amount = round(sum(float(o.get("grand_total", 0.0) or 0.0) for o in orders), 2)
+
+    manifest_doc = {
+        "_id": manifest_id,
+        "manifest_no": manifest_no,
+        "status": status,
+        "dispatch_date": now,
+        "dispatched_by": ObjectId(user_id) if (user_id and ObjectId.is_valid(user_id)) else None,
+        "warehouse": {
+            "id": warehouse_id,
+            "name": wh_doc.get("name") if wh_doc else None,
+        } if warehouse_id else None,
+        "vehicle": {
+            "id": vehicle_id,
+            "vehicle_number": veh_doc.get("vehicle_number") if veh_doc else None,
+            "model": veh_doc.get("model") if veh_doc else None,
+        } if vehicle_id else None,
+        "route_name": route_name,
+        "notes": notes,
+        "order_ids": obj_ids,
+        "total_orders": len(orders),
+        "total_trip_amount": total_trip_amount,
+        "consolidated_items": consolidated_items,
+        "customer_stops": customer_stops,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    delivery_manifests_collection.insert_one(manifest_doc)
+    return manifest_doc
+
+
+
+# =========================================================
 # ROUTE: CREATE ORDER
 # POST /orders/v1
 # =========================================================
@@ -593,15 +710,15 @@ def create_order(
                 variant_id=v_id,
                 warehouse_id=warehouse_obj_id,
             )
-            unblocked_qty = breakdown["unblocked_stock"]
-            if req_qty > unblocked_qty:
+            phys_qty = breakdown["physical_stock"]
+            if req_qty > phys_qty:
                 var = product_variants_collection.find_one({"_id": v_id}) or {}
                 var_name = var.get("name") or str(v_id)
                 raise HTTPException(
                     status_code=400,
                     detail=(
-                        f"Insufficient stock for transfer of '{var_name}' from warehouse. "
-                        f"Requested: {req_qty}, Available: {unblocked_qty}."
+                        f"Insufficient physical stock for transfer of '{var_name}' from warehouse. "
+                        f"Requested: {req_qty}, Available in warehouse: {phys_qty}."
                     )
                 )
 
@@ -685,9 +802,65 @@ def create_order(
             "warehouse_to_warehouse",
         ]:
             _handle_transfer_movement(order_doc, user_id=str(current_user["user_id"]))
+
+        created_manifest_id = None
+        # If sale order is created directly as Out for Delivery -> Create manifest & Transfer if vehicle present
+        if data.type == "sale" and data.status == "Out for Delivery" and warehouse_obj_id:
+            manifest_doc = _create_delivery_manifest_document(
+                orders=[order_doc],
+                warehouse_id=warehouse_obj_id,
+                vehicle_id=vehicle_obj_id,
+                user_id=str(current_user["user_id"]),
+                notes=f"Order created directly as Out for Delivery ({order_doc.get('order_no', '')}).",
+            )
+            created_manifest_id = manifest_doc["_id"]
+            manifest_no = manifest_doc["manifest_no"]
+            orders_collection.update_one(
+                {"_id": result.inserted_id},
+                {"$set": {"manifest_id": created_manifest_id, "manifest_no": manifest_no}}
+            )
+            order_doc["manifest_id"] = created_manifest_id
+            order_doc["manifest_no"] = manifest_no
+
+            if vehicle_obj_id:
+                for it in order_doc.get("items", []):
+                    p_id = it.get("product_id")
+                    v_id = it.get("variant_id")
+                    req_qty = float(it.get("quantity", 0))
+                    if req_qty <= 0 or not (p_id and v_id):
+                        continue
+                    breakdown = get_sellable_stock_breakdown(
+                        product_id=p_id,
+                        variant_id=v_id,
+                        warehouse_id=warehouse_obj_id,
+                    )
+                    if req_qty > breakdown["physical_stock"]:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"Cannot dispatch '{it.get('product_name') or 'item'}': "
+                                f"Insufficient physical stock in warehouse. "
+                                f"Requested: {req_qty}, Available in warehouse: {breakdown['physical_stock']}."
+                            )
+                        )
+
+                transfer_stock_batches(
+                    source_type="warehouse",
+                    source_id=warehouse_obj_id,
+                    dest_type="vehicle",
+                    dest_id=vehicle_obj_id,
+                    items=order_doc.get("items", []),
+                    transfer_order_id=result.inserted_id,
+                    user_id=str(current_user["user_id"]),
+                    allocation_type="warehouse_to_vehicle",
+                    manifest_id=created_manifest_id,
+                    manifest_no=manifest_no,
+                )
     except Exception as ex:
-        # ROLLBACK: Delete the inserted order so no orphan/corrupt order is saved in the database
+        # ROLLBACK: Delete the inserted order and any generated manifest
         orders_collection.delete_one({"_id": result.inserted_id})
+        if 'created_manifest_id' in locals() and created_manifest_id:
+            delivery_manifests_collection.delete_one({"_id": created_manifest_id})
         raise ex
 
     enriched_order = enrich_orders_with_references([order_doc])[0]
@@ -821,6 +994,57 @@ def update_order(
             }
         raise HTTPException(status_code=400, detail="Delivered or Cancelled orders cannot be edited")
 
+    # Downwards-only and physical constraints validation for Out for Delivery sale orders
+    if current_status == "Out for Delivery" and existing_order.get("type") == "sale":
+        if data.warehouse_id is not None:
+            wh_val = validate_warehouse(data.warehouse_id)
+            if wh_val != existing_order.get("warehouse_id"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cannot change source warehouse for an order that is already Out for Delivery."
+                )
+
+        if data.customer_id is not None:
+            cust_val = validate_customer(data.customer_id)
+            if cust_val != existing_order.get("customer_id"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cannot change customer for an order that is already Out for Delivery."
+                )
+
+        if data.items is not None:
+            if len(data.items) == 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Order cannot have zero items. If all items are rejected at doorstep, update status to 'Cancelled' instead."
+                )
+
+            orig_items_map: Dict[Tuple[str, str], float] = {}
+            for it in existing_order.get("items", []):
+                p_str = str(it.get("product_id"))
+                v_str = str(it.get("variant_id"))
+                orig_items_map[(p_str, v_str)] = orig_items_map.get((p_str, v_str), 0.0) + float(it.get("quantity", 0))
+
+            for new_it in data.items:
+                p_key = (str(new_it.product_id), str(new_it.variant_id))
+                orig_qty = orig_items_map.get(p_key)
+
+                if orig_qty is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Cannot add new items while Out for Delivery. Goods are already loaded on the vehicle."
+                    )
+
+                req_qty = float(new_it.quantity)
+                if req_qty > orig_qty:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Cannot increase quantity while Out for Delivery (original loaded: {orig_qty}, requested: {req_qty}). "
+                            f"Goods on vehicle cannot be increased on the road."
+                        )
+                    )
+
     update_data = {}
     if data.vendor_id is not None:
         update_data["vendor_id"] = validate_vendor(data.vendor_id)
@@ -921,6 +1145,28 @@ def update_order(
                     "$pop": {"tracking": 1}
                 }
             )
+            raise ex
+
+    # Trigger stock batch movement for sale orders on dispatch or vehicle assignment
+    if updated_order.get("type") == "sale":
+        try:
+            _handle_sale_order_dispatch_movement(
+                order=existing_order,
+                current_status=current_status,
+                new_status=data.status or current_status,
+                new_vehicle_id=update_data.get("vehicle_id"),
+                user_id=str(current_user["user_id"]),
+            )
+            updated_order = orders_collection.find_one({"_id": obj_id})
+        except Exception as ex:
+            if status_changed:
+                orders_collection.update_one(
+                    {"_id": obj_id},
+                    {
+                        "$set": {"status": current_status, "updated_at": utc_now()},
+                        "$pop": {"tracking": 1}
+                    }
+                )
             raise ex
 
     enriched_order = enrich_orders_with_references([updated_order])[0]
@@ -1050,12 +1296,20 @@ def manual_bill_order(
     now = utc_now()
 
     status = "Completed" if order_type == "sale_return" else "Delivered"
-
     billing_tracking = create_tracking_entry(
-        status=status,
+        status="Billed",
         user_id=str(current_user["user_id"]),
         note=f"{order_type} billed with invoice {invoice_no}. Discount: ₹{discount:.2f}, COGS: ₹{total_cogs:.2f}",
     )
+    credit_days = 15
+    if order.get("customer_id"):
+        cust_doc = customers_collection.find_one({"_id": order["customer_id"]})
+        if cust_doc and cust_doc.get("credit_days"):
+            try:
+                credit_days = int(cust_doc["credit_days"])
+            except Exception:
+                credit_days = 15
+    due_date = now + timedelta(days=credit_days)
 
     # Atomic Billing Update
     update_res = orders_collection.update_one(
@@ -1070,6 +1324,12 @@ def manual_bill_order(
                 "invoice_no": invoice_no,
                 "discount": discount,
                 "grand_total": grand_total,
+                "bill_amount": grand_total,
+                "paid_amount": 0.0,
+                "pending_amount": grand_total,
+                "credit_days": credit_days,
+                "due_date": due_date,
+                "payment_status": "UNPAID",
                 "items": items,
                 "total_cogs": total_cogs,
                 "gross_profit": gross_profit,
@@ -1089,6 +1349,29 @@ def manual_bill_order(
 
     updated_order = orders_collection.find_one({"_id": obj_id})
     enriched_order = enrich_orders_with_references([updated_order])[0]
+
+    # Generate Sales Invoice / Return Voucher in accounting ledger
+    if order_type == "sale":
+        try:
+            from services.accounting_service import create_sales_invoice_voucher
+            create_sales_invoice_voucher(
+                order=updated_order,
+                invoice_no=invoice_no,
+                user_id=str(current_user["user_id"]),
+            )
+        except Exception as voucher_ex:
+            print(f"Warning: Could not create sales invoice voucher for {invoice_no}: {voucher_ex}")
+
+    elif order_type == "sale_return":
+        try:
+            from services.accounting_service import create_sales_return_voucher
+            create_sales_return_voucher(
+                order=updated_order,
+                invoice_no=invoice_no,
+                user_id=str(current_user["user_id"]),
+            )
+        except Exception as voucher_ex:
+            print(f"Warning: Could not create sales return voucher for {invoice_no}: {voucher_ex}")
 
     # Automated WhatsApp Notification
     whatsapp_sent = False
@@ -1139,6 +1422,9 @@ def manual_bill_order(
         "whatsapp_error": whatsapp_err,
         "pdf_available": True,
     }
+
+
+
 
 
 # =========================================================
@@ -1299,11 +1585,288 @@ def update_order_status(
             )
             raise ex
 
+    # Trigger stock batch movement for sale orders on dispatch (Out for Delivery) or reversal
+    if updated_order.get("type") == "sale":
+        try:
+            _handle_sale_order_dispatch_movement(
+                order=order,
+                current_status=current_status,
+                new_status=data.status,
+                new_vehicle_id=update_fields.get("vehicle_id"),
+                user_id=str(current_user["user_id"]),
+            )
+            updated_order = orders_collection.find_one({"_id": obj_id})
+        except Exception as ex:
+            # ROLLBACK: Revert status back to current_status
+            orders_collection.update_one(
+                {"_id": obj_id},
+                {
+                    "$set": {"status": current_status, "updated_at": utc_now()},
+                    "$pop": {"tracking": 1}
+                }
+            )
+            raise ex
+
     enriched = enrich_orders_with_references([updated_order])[0]
     return {
         "success": True,
         "message": "Order status updated successfully",
         "data": enriched,
+    }
+
+
+# =========================================================
+# ROUTE: BULK ORDER DISPATCH (ALL-OR-NOTHING WITH TRIP MANIFEST)
+# POST /orders/bulk-dispatch/v1
+# =========================================================
+
+@router.post("/bulk-dispatch/v1")
+def bulk_dispatch_orders(
+    data: BulkOrderDispatchRequest,
+    current_user=Depends(get_current_user)
+):
+    """
+    Dispatches multiple sale orders in a single atomic bulk operation:
+    1. Validates all orders exist, are active, not delivered/cancelled, and share the same warehouse.
+    2. Performs All-or-Nothing pre-flight physical stock check across aggregate trip demand.
+    3. Executes atomic stock transfers per order, tagging each with manifest_id and manifest_no.
+    4. Generates a unified Driver Loading Manifest (Trip Sheet) and saves it permanently.
+    """
+    if not data.order_ids:
+        raise HTTPException(status_code=400, detail="order_ids list cannot be empty")
+
+    user_id_str = str(current_user["user_id"])
+    obj_ids = [validate_object_id(oid, "order_id") for oid in data.order_ids]
+
+    orders = list(orders_collection.find({"_id": {"$in": obj_ids}}))
+    if len(orders) != len(obj_ids):
+        found_ids = {o["_id"] for o in orders}
+        missing = [str(oid) for oid in obj_ids if oid not in found_ids]
+        raise HTTPException(status_code=404, detail=f"Orders not found: {missing}")
+
+    # Validate order types and statuses
+    for o in orders:
+        if o.get("type") != "sale":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Order '{o.get('order_no') or str(o['_id'])}' is type '{o.get('type')}'. Only sale orders can be dispatched for delivery."
+            )
+        if o.get("status") in ["Delivered", "Cancelled"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Order '{o.get('order_no') or str(o['_id'])}' is already {o.get('status')} and cannot be dispatched."
+            )
+
+    # Validate source warehouse consistency
+    warehouse_ids = set()
+    for o in orders:
+        wid = o.get("warehouse_id")
+        if not wid:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Order '{o.get('order_no') or str(o['_id'])}' has no warehouse_id assigned."
+            )
+        warehouse_ids.add(wid)
+
+    if len(warehouse_ids) > 1:
+        wh_names = []
+        for wid in warehouse_ids:
+            wh_doc = warehouses_collection.find_one({"_id": wid})
+            wh_names.append(wh_doc.get("name") if wh_doc else str(wid))
+        raise HTTPException(
+            status_code=400,
+            detail=f"All orders in a bulk dispatch must originate from the same warehouse. Found: {wh_names}"
+        )
+
+    src_warehouse_id = list(warehouse_ids)[0]
+    wh_doc = warehouses_collection.find_one({"_id": src_warehouse_id})
+
+    # Validate vehicle (if provided)
+    target_vehicle_id = None
+    veh_doc = None
+    if data.vehicle_id:
+        target_vehicle_id = validate_vehicle(data.vehicle_id)
+        veh_doc = vehicles_collection.find_one({"_id": target_vehicle_id})
+
+    now = utc_now()
+    manifest_id = ObjectId()
+    manifest_no = generate_manifest_no()
+
+    # -------------------------------------------------------------
+    # ALL-OR-NOTHING PRE-FLIGHT STOCK CHECK
+    # -------------------------------------------------------------
+    trip_demand: Dict[Tuple[ObjectId, ObjectId], float] = {}
+    for o in orders:
+        for it in o.get("items", []):
+            p_id = it.get("product_id")
+            v_id = it.get("variant_id")
+            if isinstance(p_id, str) and ObjectId.is_valid(p_id):
+                p_id = ObjectId(p_id)
+            if isinstance(v_id, str) and ObjectId.is_valid(v_id):
+                v_id = ObjectId(v_id)
+            qty = float(it.get("quantity", 0))
+            if p_id and v_id and qty > 0:
+                trip_demand[(p_id, v_id)] = trip_demand.get((p_id, v_id), 0.0) + qty
+
+    shortages = []
+    for (p_id, v_id), total_req in trip_demand.items():
+        breakdown = get_sellable_stock_breakdown(
+            product_id=p_id,
+            variant_id=v_id,
+            warehouse_id=src_warehouse_id,
+        )
+        phys_stock = breakdown["physical_stock"]
+        if total_req > phys_stock:
+            prod = products_collection.find_one({"_id": p_id})
+            var = product_variants_collection.find_one({"_id": v_id})
+            shortages.append({
+                "product_name": prod.get("name") if prod else str(p_id),
+                "variant_name": var.get("name") if var else str(v_id),
+                "sku": var.get("sku") if var else "",
+                "requested_quantity": round(total_req, 4),
+                "warehouse_physical_stock": round(phys_stock, 4),
+                "shortfall": round(total_req - phys_stock, 4),
+            })
+
+    if shortages:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "INSUFFICIENT_WAREHOUSE_STOCK",
+                "message": "Cannot dispatch bulk orders: Warehouse has insufficient physical stock for this trip. No stock was transferred.",
+                "shortages": shortages,
+            }
+        )
+
+    # -------------------------------------------------------------
+    # EXECUTE PER-ORDER TRANSFERS & UPDATE ORDERS
+    # -------------------------------------------------------------
+    for o in orders:
+        # Transfer order items to vehicle with manifest tags only if vehicle provided
+        if target_vehicle_id:
+            transfer_stock_batches(
+                source_type="warehouse",
+                source_id=src_warehouse_id,
+                dest_type="vehicle",
+                dest_id=target_vehicle_id,
+                items=o.get("items", []),
+                transfer_order_id=o["_id"],
+                user_id=user_id_str,
+                allocation_type="warehouse_to_vehicle",
+                manifest_id=manifest_id,
+                manifest_no=manifest_no,
+            )
+
+        veh_number_str = veh_doc.get("vehicle_number") if veh_doc else (str(target_vehicle_id) if target_vehicle_id else None)
+        note_suffix = f" on vehicle {veh_number_str}" if veh_number_str else " without vehicle assignment (stock remains in warehouse)"
+        tracking_entry = create_tracking_entry(
+            status=data.status,
+            user_id=user_id_str,
+            note=data.note or f"Dispatched Out for Delivery under Manifest {manifest_no}{note_suffix}.",
+        )
+
+        update_set: Dict[str, Any] = {
+            "status": data.status,
+            "manifest_id": manifest_id,
+            "manifest_no": manifest_no,
+            "updated_at": now,
+        }
+        if target_vehicle_id:
+            update_set["vehicle_id"] = target_vehicle_id
+
+        orders_collection.update_one(
+            {"_id": o["_id"]},
+            {
+                "$set": update_set,
+                "$push": {"tracking": tracking_entry},
+            }
+        )
+
+    # -------------------------------------------------------------
+    # BUILD UNIFIED DRIVER LOADING MANIFEST
+    # -------------------------------------------------------------
+    manifest_doc = _create_delivery_manifest_document(
+        orders=orders,
+        warehouse_id=src_warehouse_id,
+        vehicle_id=target_vehicle_id,
+        user_id=user_id_str,
+        route_name=data.route_name,
+        notes=data.note,
+        status="active",
+        manifest_id=manifest_id,
+        manifest_no=manifest_no,
+    )
+
+    serialized_manifest = convert_utc_to_ist(serialize_order(manifest_doc))
+    msg = (
+        f"Bulk dispatch completed successfully. Created Trip Manifest {manifest_no}."
+        if target_vehicle_id
+        else f"Updated {len(orders)} orders to '{data.status}' under Manifest {manifest_no}. Stock remains in warehouse (Option 2 - no vehicle assigned)."
+    )
+    return {
+        "success": True,
+        "message": msg,
+        "manifest": serialized_manifest,
+    }
+
+
+# =========================================================
+# ROUTE: GET DRIVER LOADING MANIFEST BY ID OR NUMBER
+# GET /orders/manifest/v1/{manifest_id_or_no}
+# =========================================================
+
+@router.get("/manifest/v1/{manifest_id_or_no}")
+def get_manifest(manifest_id_or_no: str):
+    query: Dict[str, Any] = {}
+    if ObjectId.is_valid(manifest_id_or_no):
+        query = {"$or": [{"_id": ObjectId(manifest_id_or_no)}, {"manifest_no": manifest_id_or_no}]}
+    else:
+        query = {"manifest_no": manifest_id_or_no}
+
+    doc = delivery_manifests_collection.find_one(query)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Trip manifest not found")
+
+    return {
+        "success": True,
+        "data": convert_utc_to_ist(serialize_order(doc)),
+    }
+
+
+# =========================================================
+# ROUTE: LIST TRIP MANIFESTS
+# GET /orders/manifests/v1
+# =========================================================
+
+@router.get("/manifests/v1")
+def list_manifests(
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+    vehicle_id: Optional[str] = None,
+    warehouse_id: Optional[str] = None,
+):
+    page_val = int(page.default if hasattr(page, "default") else page)
+    limit_val = int(limit.default if hasattr(limit, "default") else limit)
+
+    query: Dict[str, Any] = {}
+    if vehicle_id:
+        query["vehicle.id"] = validate_object_id(vehicle_id, "vehicle_id")
+    if warehouse_id:
+        query["warehouse.id"] = validate_object_id(warehouse_id, "warehouse_id")
+
+    total = delivery_manifests_collection.count_documents(query)
+    cursor = delivery_manifests_collection.find(query).sort([("created_at", -1)]).skip((page_val - 1) * limit_val).limit(limit_val)
+    manifests = [convert_utc_to_ist(serialize_order(m)) for m in cursor]
+
+    return {
+        "success": True,
+        "data": manifests,
+        "pagination": {
+            "page": page_val,
+            "limit": limit_val,
+            "total": total,
+            "total_pages": (total + limit_val - 1) // limit_val if limit_val else 1,
+        }
     }
 
 
@@ -1366,6 +1929,8 @@ def get_order_batch_traceability(order_id: str):
     elif order_type == "sale":
         consumptions = list(sale_batch_consumptions_collection.find({"sale_order_id": obj_id}))
         traceability_data["batch_consumptions"] = serialize_value(consumptions)
+        allocations = list(stock_batch_allocations_collection.find({"transfer_order_id": obj_id}))
+        traceability_data["batch_allocations"] = serialize_value(allocations)
     elif order_type == "sale_return":
         allocations = list(stock_batch_allocations_collection.find({"transfer_order_id": obj_id}))
         traceability_data["batch_allocations"] = serialize_value(allocations)
@@ -1376,6 +1941,186 @@ def get_order_batch_traceability(order_id: str):
     return {
         "success": True,
         "data": convert_utc_to_ist(traceability_data),
+    }
+
+
+# =========================================================
+# ROUTE: AUDIT VEHICLE STOCK ALLOCATIONS & TRANSFERS
+# GET /orders/vehicle-allocations/v1/{vehicle_id}
+# =========================================================
+
+@router.get("/vehicle-allocations/v1/{vehicle_id}")
+def get_vehicle_stock_allocations(
+    vehicle_id: str,
+    manifest_id_or_no: Optional[str] = None,
+    allocation_type: Optional[str] = None,
+    product_id: Optional[str] = None,
+    variant_id: Optional[str] = None,
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """
+    Audits all stock batch allocations and transfers associated with a specific vehicle:
+    - Inflow: warehouse_to_vehicle (loading / bulk dispatch)
+    - Outflow: vehicle_to_warehouse (end-of-day return / cancellation return)
+    - Reassignment: vehicle_to_vehicle
+    Filterable by manifest_no, manifest_id, allocation_type, product_id, and variant_id.
+    """
+    veh_obj = validate_object_id(vehicle_id, "vehicle_id")
+    page_val = int(page.default if hasattr(page, "default") else page)
+    limit_val = int(limit.default if hasattr(limit, "default") else limit)
+
+    query: Dict[str, Any] = {
+        "$or": [
+            {"from_location.id": veh_obj},
+            {"to_location.id": veh_obj},
+        ]
+    }
+    if manifest_id_or_no:
+        if ObjectId.is_valid(manifest_id_or_no):
+            query["$and"] = [{"$or": [{"manifest_id": ObjectId(manifest_id_or_no)}, {"manifest_no": manifest_id_or_no}]}]
+        else:
+            query["manifest_no"] = manifest_id_or_no
+
+    if allocation_type:
+        query["allocation_type"] = allocation_type
+
+    if product_id:
+        query["product_id"] = validate_object_id(product_id, "product_id")
+
+    if variant_id:
+        query["variant_id"] = validate_object_id(variant_id, "variant_id")
+
+    total = stock_batch_allocations_collection.count_documents(query)
+    cursor = stock_batch_allocations_collection.find(query).sort([("created_at", -1)]).skip((page_val - 1) * limit_val).limit(limit_val)
+    raw_allocations = list(cursor)
+
+    enriched = []
+    for a in raw_allocations:
+        item = serialize_value(a)
+        if a.get("product_id"):
+            prod = products_collection.find_one({"_id": a["product_id"]}, {"name": 1})
+            item["product_name"] = prod.get("name") if prod else None
+        if a.get("variant_id"):
+            var = product_variants_collection.find_one({"_id": a["variant_id"]}, {"name": 1, "sku": 1})
+            item["variant_name"] = var.get("name") if var else None
+            item["sku"] = var.get("sku") if var else None
+        if a.get("transfer_order_id"):
+            ord_doc = orders_collection.find_one({"_id": a["transfer_order_id"]}, {"order_no": 1, "type": 1, "status": 1})
+            if ord_doc:
+                item["order_no"] = ord_doc.get("order_no")
+                item["order_status"] = ord_doc.get("status")
+        if a.get("allocated_by"):
+            u = users_collection.find_one({"_id": a["allocated_by"]}, {"name": 1, "username": 1})
+            item["allocated_by_name"] = (u.get("name") or u.get("username")) if u else None
+
+        from_loc = a.get("from_location", {})
+        to_loc = a.get("to_location", {})
+        if to_loc.get("id") == veh_obj:
+            item["direction"] = "INWARD"
+            item["direction_label"] = "Loaded into Vehicle"
+        elif from_loc.get("id") == veh_obj:
+            item["direction"] = "OUTWARD"
+            item["direction_label"] = "Unloaded from Vehicle"
+        else:
+            item["direction"] = "TRANSFER"
+            item["direction_label"] = a.get("allocation_type")
+
+        enriched.append(item)
+
+    return {
+        "success": True,
+        "vehicle_id": str(veh_obj),
+        "total": total,
+        "page": page_val,
+        "limit": limit_val,
+        "allocations": convert_utc_to_ist(enriched),
+    }
+
+
+# =========================================================
+# ROUTE: AUDIT WAREHOUSE STOCK ALLOCATIONS & TRANSFERS
+# GET /orders/warehouse-allocations/v1/{warehouse_id}
+# =========================================================
+
+@router.get("/warehouse-allocations/v1/{warehouse_id}")
+def get_warehouse_stock_allocations(
+    warehouse_id: str,
+    allocation_type: Optional[str] = None,
+    product_id: Optional[str] = None,
+    variant_id: Optional[str] = None,
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """
+    Audits all stock batch allocations and physical movements for a warehouse:
+    - Inflow: purchase_to_warehouse, vehicle_to_warehouse (unloading / return), warehouse_to_warehouse (received)
+    - Outflow: warehouse_to_vehicle (loading / dispatch), warehouse_to_warehouse (sent)
+    Filterable by allocation_type, product_id, and variant_id.
+    """
+    wh_obj = validate_object_id(warehouse_id, "warehouse_id")
+    page_val = int(page.default if hasattr(page, "default") else page)
+    limit_val = int(limit.default if hasattr(limit, "default") else limit)
+
+    query: Dict[str, Any] = {
+        "$or": [
+            {"from_location.id": wh_obj},
+            {"to_location.id": wh_obj},
+        ]
+    }
+    if allocation_type:
+        query["allocation_type"] = allocation_type
+
+    if product_id:
+        query["product_id"] = validate_object_id(product_id, "product_id")
+
+    if variant_id:
+        query["variant_id"] = validate_object_id(variant_id, "variant_id")
+
+    total = stock_batch_allocations_collection.count_documents(query)
+    cursor = stock_batch_allocations_collection.find(query).sort([("created_at", -1)]).skip((page_val - 1) * limit_val).limit(limit_val)
+    raw_allocations = list(cursor)
+
+    enriched = []
+    for a in raw_allocations:
+        item = serialize_value(a)
+        if a.get("product_id"):
+            prod = products_collection.find_one({"_id": a["product_id"]}, {"name": 1})
+            item["product_name"] = prod.get("name") if prod else None
+        if a.get("variant_id"):
+            var = product_variants_collection.find_one({"_id": a["variant_id"]}, {"name": 1, "sku": 1})
+            item["variant_name"] = var.get("name") if var else None
+            item["sku"] = var.get("sku") if var else None
+        if a.get("transfer_order_id"):
+            ord_doc = orders_collection.find_one({"_id": a["transfer_order_id"]}, {"order_no": 1, "type": 1, "status": 1})
+            if ord_doc:
+                item["order_no"] = ord_doc.get("order_no")
+                item["order_status"] = ord_doc.get("status")
+        if a.get("allocated_by"):
+            u = users_collection.find_one({"_id": a["allocated_by"]}, {"name": 1, "username": 1})
+            item["allocated_by_name"] = (u.get("name") or u.get("username")) if u else None
+
+        from_loc = a.get("from_location", {})
+        to_loc = a.get("to_location", {})
+        if to_loc.get("id") == wh_obj:
+            item["direction"] = "INWARD"
+            item["direction_label"] = "Received into Warehouse"
+        elif from_loc.get("id") == wh_obj:
+            item["direction"] = "OUTWARD"
+            item["direction_label"] = "Dispatched from Warehouse"
+        else:
+            item["direction"] = "TRANSFER"
+            item["direction_label"] = a.get("allocation_type")
+
+        enriched.append(item)
+
+    return {
+        "success": True,
+        "warehouse_id": str(wh_obj),
+        "total": total,
+        "page": page_val,
+        "limit": limit_val,
+        "allocations": convert_utc_to_ist(enriched),
     }
 
 
@@ -1466,3 +2211,163 @@ def _handle_transfer_movement(order_doc: dict, user_id: Optional[str] = None):
                 transfer_order_id=order_id,
                 user_id=user_id,
             )
+
+
+def _handle_sale_order_dispatch_movement(
+    order: Dict[str, Any],
+    current_status: str,
+    new_status: str,
+    new_vehicle_id: Optional[ObjectId],
+    user_id: str,
+) -> None:
+    """
+    Handles automatic stock batch transfers for sale orders:
+    1. Dispatch to vehicle: when moving to 'Out for Delivery' with a vehicle assigned,
+       or when assigning a vehicle to an order already in 'Out for Delivery'.
+       (If vehicle_id is not provided, transfer is skipped per Option 2).
+    2. Reversal from vehicle: when moving from 'Out for Delivery' (with vehicle)
+       back to 'Ready to Pick Up', 'Pending', or 'Cancelled'.
+    3. Reassignment between vehicles: when vehicle changes while 'Out for Delivery'.
+    """
+    if order.get("type") != "sale":
+        return
+
+    order_id = order["_id"]
+    items = order.get("items", [])
+    if not items:
+        return
+
+    orig_vehicle_id = order.get("vehicle_id")
+    effective_vehicle_id = new_vehicle_id or orig_vehicle_id
+    warehouse_id = order.get("warehouse_id")
+
+    # A. Reassignment between vehicles while Out for Delivery
+    if (
+        current_status == "Out for Delivery"
+        and (new_status == "Out for Delivery" or not new_status)
+        and orig_vehicle_id
+        and new_vehicle_id
+        and orig_vehicle_id != new_vehicle_id
+    ):
+        transfer_stock_batches(
+            source_type="vehicle",
+            source_id=orig_vehicle_id,
+            dest_type="vehicle",
+            dest_id=new_vehicle_id,
+            items=items,
+            transfer_order_id=order_id,
+            user_id=user_id,
+            allocation_type="vehicle_to_vehicle",
+        )
+        return
+
+    # B. Dispatch -> Transfer from warehouse to vehicle & Auto-generate Manifest if missing
+    is_becoming_out_for_delivery = (new_status == "Out for Delivery" and current_status != "Out for Delivery")
+    is_assigning_vehicle_while_out = (current_status == "Out for Delivery" and not orig_vehicle_id and new_vehicle_id)
+
+    if (is_becoming_out_for_delivery or is_assigning_vehicle_while_out) and warehouse_id:
+        manifest_id = order.get("manifest_id")
+        manifest_no = order.get("manifest_no")
+        created_manifest_id = None
+
+        if not manifest_id:
+            veh_suffix = f" on vehicle {effective_vehicle_id}" if effective_vehicle_id else " without vehicle assignment"
+            manifest_doc = _create_delivery_manifest_document(
+                orders=[order],
+                warehouse_id=warehouse_id,
+                vehicle_id=effective_vehicle_id,
+                user_id=user_id,
+                notes=f"Single order dispatch: {order.get('order_no', str(order_id))}{veh_suffix}",
+            )
+            manifest_id = manifest_doc["_id"]
+            manifest_no = manifest_doc["manifest_no"]
+            created_manifest_id = manifest_id
+            orders_collection.update_one(
+                {"_id": order_id},
+                {"$set": {"manifest_id": manifest_id, "manifest_no": manifest_no}}
+            )
+        elif is_assigning_vehicle_while_out and effective_vehicle_id:
+            veh_doc = vehicles_collection.find_one({"_id": effective_vehicle_id})
+            delivery_manifests_collection.update_one(
+                {"_id": manifest_id},
+                {
+                    "$set": {
+                        "vehicle": {
+                            "id": effective_vehicle_id,
+                            "vehicle_number": veh_doc.get("vehicle_number") if veh_doc else None,
+                            "model": veh_doc.get("model") if veh_doc else None,
+                        },
+                        "updated_at": utc_now(),
+                    }
+                }
+            )
+
+        if effective_vehicle_id:
+            try:
+                # 1. Validate physical stock in warehouse before transferring
+                for it in items:
+                    p_id = it.get("product_id")
+                    v_id = it.get("variant_id")
+                    req_qty = float(it.get("quantity", 0))
+                    if req_qty <= 0 or not (p_id and v_id):
+                        continue
+
+                    breakdown = get_sellable_stock_breakdown(
+                        product_id=p_id,
+                        variant_id=v_id,
+                        warehouse_id=warehouse_id,
+                    )
+                    if req_qty > breakdown["physical_stock"]:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"Cannot dispatch '{it.get('product_name') or 'item'}': "
+                                f"Insufficient physical stock in warehouse. "
+                                f"Requested: {req_qty}, Available in warehouse: {breakdown['physical_stock']}."
+                            )
+                        )
+
+                # 2. Transfer stock from warehouse to vehicle
+                transfer_stock_batches(
+                    source_type="warehouse",
+                    source_id=warehouse_id,
+                    dest_type="vehicle",
+                    dest_id=effective_vehicle_id,
+                    items=items,
+                    transfer_order_id=order_id,
+                    user_id=user_id,
+                    allocation_type="warehouse_to_vehicle",
+                    manifest_id=manifest_id,
+                    manifest_no=manifest_no,
+                )
+            except Exception as ex:
+                if created_manifest_id:
+                    delivery_manifests_collection.delete_one({"_id": created_manifest_id})
+                    orders_collection.update_one(
+                        {"_id": order_id},
+                        {"$unset": {"manifest_id": "", "manifest_no": ""}}
+                    )
+                raise ex
+
+    # C. Reversal -> Transfer back from vehicle to warehouse (only when order is reverted to warehouse queue)
+    # NOTE: When an order is Cancelled at the doorstep while Out for Delivery, goods physically remain on the vehicle.
+    # The cancelled order unblocks the stock on the vehicle, making it immediately available for the driver to re-sell or unload at end-of-day.
+    is_reverting_from_out = (
+        current_status == "Out for Delivery"
+        and new_status in ["Pending", "Ready to Pick Up", "Ready to Pick-up"]
+        and orig_vehicle_id
+        and warehouse_id
+    )
+
+    if is_reverting_from_out:
+        transfer_stock_batches(
+            source_type="vehicle",
+            source_id=orig_vehicle_id,
+            dest_type="warehouse",
+            dest_id=warehouse_id,
+            items=items,
+            transfer_order_id=order_id,
+            user_id=user_id,
+            allocation_type="vehicle_to_warehouse",
+        )
+        orders_collection.update_one({"_id": order_id}, {"$set": {"vehicle_id": None}})

@@ -305,7 +305,11 @@ def get_warehouse_inventory(
     pkg_map = meta["packages"]
     warehouses_map = meta["warehouses"]
 
-    blocked_map = get_bulk_blocked_quantities(warehouse_id=match_filter.get("warehouse_id"))
+    blocked_map = get_bulk_blocked_quantities(
+        warehouse_id=match_filter.get("warehouse_id"),
+        location_type="warehouse",
+        group_by_location=True,
+    )
 
     data = []
     for doc in aggregated:
@@ -324,7 +328,7 @@ def get_warehouse_inventory(
         avail_qty = doc.get("available_quantity", 0)
         out_qty = max(0.0, round(in_qty - avail_qty, 6))
 
-        blocked_qty = blocked_map.get((pid, vid), 0.0)
+        blocked_qty = blocked_map.get((wid, pid, vid), 0.0)
         unblocked_qty = max(0.0, round(avail_qty - blocked_qty, 6))
 
         data.append({
@@ -416,36 +420,44 @@ def get_main_inventory(
     search: Optional[str] = None
 ):
 
+    page = int(page) if isinstance(page, (int, str)) and str(page).isdigit() else 1
+    limit = int(limit) if isinstance(limit, (int, str)) and str(limit).isdigit() else 20
     skip = (
         page - 1
     ) * limit
 
     # =====================================================
     # BASE QUERY
+    #
+    # Main inventory rules:
+    # 1. Sale orders: Delivered + Billed
+    # 2. Else order types (purchase, purchase_return, sale_return): Completed + Billed
     # =====================================================
 
     query = {
-    "record_status": "active",
-    "type": {
-        "$in": MAIN_INVENTORY_TYPES
-    },
-    "$or": [
-        {
-            "type": "sale",
-            "status": "Delivered"
+        "record_status": "active",
+        "invoice_no": {
+            "$nin": [None, ""]
         },
-        {
-            "type": {
-                "$in": [
-                    "purchase",
-                    "purchase_return",
-                    "sale_return"
-                ]
+        "$or": [
+            # 1. Sale orders: Delivered + Billed
+            {
+                "type": "sale",
+                "status": "Delivered"
             },
-            "status": "Completed"
-        }
-    ]
-}
+            # 2. Other order types: Completed + Billed
+            {
+                "type": {
+                    "$in": [
+                        "purchase",
+                        "purchase_return",
+                        "sale_return"
+                    ]
+                },
+                "status": "Completed"
+            }
+        ]
+    }
     # =====================================================
     # PRODUCT FILTER
     # =====================================================
@@ -1204,8 +1216,11 @@ def get_unblocked_stock(
     ]
     phys_results = list(stock_batches_collection.aggregate(phys_pipeline))
 
-    # 2. Blocked pipeline quantities
-    blocked_map = get_bulk_blocked_quantities(warehouse_id=wh_obj)
+    blocked_map = get_bulk_blocked_quantities(
+        warehouse_id=wh_obj,
+        location_type="warehouse",
+        group_by_location=False,
+    )
 
     # 3. Combine keys
     keys = set()
@@ -1397,7 +1412,11 @@ def get_vehicle_inventory(
     pkg_map = meta["packages"]
     vehicles_map = meta["vehicles"]
 
-    blocked_map = get_bulk_blocked_quantities(vehicle_id=match_filter.get("vehicle_id"))
+    blocked_map = get_bulk_blocked_quantities(
+        vehicle_id=match_filter.get("vehicle_id"),
+        location_type="vehicle",
+        group_by_location=True,
+    )
 
     data = []
     for doc in aggregated:
@@ -1416,7 +1435,7 @@ def get_vehicle_inventory(
         avail_qty = doc.get("available_quantity", 0)
         sale_qty = max(0.0, round(in_qty - avail_qty, 6))
 
-        blocked_qty = blocked_map.get((pid, vid), 0.0)
+        blocked_qty = blocked_map.get((veh_id, pid, vid), 0.0)
         unblocked_qty = max(0.0, round(avail_qty - blocked_qty, 6))
 
         vehicle_data = {
@@ -1519,7 +1538,9 @@ def get_batch_stock(
     Supports instant lookup by warehouse, vehicle, product, variant, and search.
     Provides batch-level FIFO tracking, stock valuation, and lot aging metrics.
     """
-    skip = (page - 1) * limit
+    page_val = int(page.default if hasattr(page, "default") else page)
+    limit_val = int(limit.default if hasattr(limit, "default") else limit)
+    skip = (page_val - 1) * limit_val
 
     # Sync historical purchases if collection is completely fresh
     if stock_batches_collection.count_documents({}) == 0:
@@ -1701,8 +1722,8 @@ def get_batch_stock(
         ]
 
     total = len(data)
-    total_pages = (total + limit - 1) // limit if limit > 0 else 1
-    paginated_data = data[skip : skip + limit]
+    total_pages = (total + limit_val - 1) // limit_val if limit_val > 0 else 1
+    paginated_data = data[skip : skip + limit_val]
 
     return {
         "success": True,
@@ -1713,8 +1734,8 @@ def get_batch_stock(
             "total_valuation": round(total_valuation, 2),
         },
         "pagination": {
-            "page": page,
-            "limit": limit,
+            "page": page_val,
+            "limit": limit_val,
             "total": total,
             "total_pages": total_pages,
         }

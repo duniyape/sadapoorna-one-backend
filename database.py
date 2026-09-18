@@ -43,6 +43,7 @@ vouchers_collection = db["accounting_vouchers"]
 stock_batches_collection = db["stock_batches"]
 stock_batch_allocations_collection = db["stock_batch_allocations"]
 sale_batch_consumptions_collection = db["sale_batch_consumptions"]
+delivery_manifests_collection = db["delivery_manifests"]
 
 # =========================================================
 # WHATSAPP INDEXES
@@ -165,4 +166,16 @@ orders_collection.create_index(
 )
 orders_collection.create_index(
     [("created_at", -1)]
+)
+
+# Delivery manifests collection indexes
+delivery_manifests_collection.create_index(
+    [("manifest_no", 1)],
+    unique=True
+)
+delivery_manifests_collection.create_index(
+    [("created_at", -1)]
+)
+delivery_manifests_collection.create_index(
+    [("warehouse.id", 1), ("vehicle.id", 1)]
 )

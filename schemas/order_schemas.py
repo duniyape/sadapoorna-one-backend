@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, field_validator
-from typing import Optional, List
+from typing import Optional, List, Literal
 from datetime import datetime
 
 # =========================================================
@@ -241,3 +241,27 @@ class StockTransferRequest(BaseModel):
         if val not in allowed:
             raise ValueError(f"Invalid transfer_type '{v}'. Allowed are: {allowed}")
         return val
+
+
+class OrderReceiptRequest(BaseModel):
+    payment_mode: Literal["CASH", "UPI", "BANK_TRANSFER", "CHEQUE", "FINANCE"]
+    amount: float = Field(..., gt=0)
+    bank_account_name: Optional[str] = None
+    transaction_ref: Optional[str] = None
+    cheque_no: Optional[str] = None
+    cheque_date: Optional[str] = None
+    cheque_bank: Optional[str] = None
+    financier_name: Optional[str] = None
+    receipt_date: Optional[datetime] = None
+    bank_clearance_date: Optional[datetime] = None
+    notes: Optional[str] = None
+    collected_by_id: Optional[str] = None
+
+
+class BulkOrderDispatchRequest(BaseModel):
+    order_ids: List[str] = Field(..., min_length=1)
+    vehicle_id: Optional[str] = None
+    status: str = "Out for Delivery"
+    note: Optional[str] = None
+    route_name: Optional[str] = None
+

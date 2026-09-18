@@ -1,9 +1,10 @@
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
-from typing import Optional, Literal
+from fastapi import APIRouter, HTTPException, Query, Depends
+from pydantic import BaseModel, Field, field_validator
+from typing import Optional, Literal, Union, Any
 from datetime import datetime, timezone
 from bson import ObjectId
 from database import groups_collection, subgroups_collection, ledgers_collection
+from routes.auth import get_current_user
 
 # =========================================================
 # HELPERS
@@ -618,6 +619,7 @@ def create_ledger(data: LedgerCreate):
 @router.get("/ledgers")
 def get_ledgers(
     group_id: Optional[str] = None,
+    group_name: Optional[str] = None,
     subgroup_id: Optional[str] = None,
     status: Optional[str] = None
 ):
@@ -626,6 +628,12 @@ def get_ledgers(
 
     if group_id:
         query["group_id"] = object_id(group_id)
+
+    if group_name:
+        query["group_name"] = {
+            "$regex": f"^{group_name.strip()}$",
+            "$options": "i"
+        }
 
     if subgroup_id:
         query["subgroup_id"] = object_id(
@@ -645,6 +653,48 @@ def get_ledgers(
         ledgers.append(
             serialize_doc(ledger)
         )
+
+    return {
+        "success": True,
+        "count": len(ledgers),
+        "data": ledgers
+    }
+
+
+# =========================================================
+# ROUTE: GET BANK ACCOUNTS LEDGERS
+# GET /accounting/ledgers/bank-accounts
+# GET /accounting/bank-accounts
+# =========================================================
+
+
+@router.get("/ledgers/bank-accounts")
+def get_bank_accounts_ledgers_endpoint(
+    status: Optional[str] = Query(None, description="Filter by status, e.g. ACTIVE"),
+    search: Optional[str] = Query(None, description="Search bank ledger name"),
+):
+    # Find Bank Accounts group
+    bank_grp = groups_collection.find_one({
+        "group_name": {"$regex": "^bank account", "$options": "i"}
+    })
+
+    query = {}
+    if bank_grp:
+        query["$or"] = [
+            {"group_id": bank_grp["_id"]},
+            {"group_name": {"$regex": "^bank account", "$options": "i"}}
+        ]
+    else:
+        query["group_name"] = {"$regex": "^bank account", "$options": "i"}
+
+    if status:
+        query["status"] = status.strip().upper()
+
+    if search:
+        query["ledger_name"] = {"$regex": search.strip(), "$options": "i"}
+
+    cursor = ledgers_collection.find(query).sort("ledger_name", 1)
+    ledgers = [serialize_doc(ledger) for ledger in cursor]
 
     return {
         "success": True,
@@ -822,3 +872,452 @@ def delete_ledger(ledger_id: str):
         "success": True,
         "message": "Ledger deleted successfully"
     }
+
+
+# =========================================================
+# ROUTE: DUE CUSTOMERS LIST WITH AGING
+# GET /accounting/customers/due
+# GET /accounting/customers/aging
+# =========================================================
+
+@router.get("/customers/due")
+def get_due_customers_list(
+    search: Optional[str] = Query(None, description="Search by name, custom ID, mobile, or company"),
+    branch_id: Optional[str] = Query(None, description="Filter by branch ID"),
+    assigned_employee_id: Optional[str] = Query(None, description="Filter by sales agent/employee ID"),
+    aging_bucket: Optional[str] = Query(None, description="Filter by bucket: current, days_1_30, days_31_60, days_61_90, days_90_plus, overdue"),
+    is_overdue: Optional[bool] = Query(None, description="True for overdue only, False for not overdue"),
+    min_due: Optional[float] = Query(None, description="Minimum outstanding balance"),
+    max_due: Optional[float] = Query(None, description="Maximum outstanding balance"),
+    sort_by: str = Query("total_outstanding", description="Sort by: total_outstanding, total_overdue, max_dpd, customer_name, oldest_due_date"),
+    sort_order: str = Query("desc", description="Sort order: asc or desc"),
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int = Query(20, ge=1, le=100, description="Items per page"),
+    include_bills: bool = Query(False, description="Include detailed unpaid bills list for each customer"),
+):
+    from services.accounting_service import get_due_customers_aging_list
+    try:
+        res = get_due_customers_aging_list(
+            search=search,
+            branch_id=branch_id,
+            assigned_employee_id=assigned_employee_id,
+            aging_bucket=aging_bucket,
+            is_overdue=is_overdue,
+            min_due=min_due,
+            max_due=max_due,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            page=page,
+            limit=limit,
+            include_bills=include_bills,
+        )
+        return {
+            "success": True,
+            **serialize_doc(res)
+        }
+    except Exception as ex:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch due customers list: {ex}"
+        )
+
+
+# =========================================================
+# ROUTE: CUSTOMER DPD & DEBTORS AGING
+# GET /accounting/customers/{customer_id}/aging
+# =========================================================
+
+@router.get("/customers/{customer_id}/aging")
+def get_customer_aging_analysis(
+    customer_id: str
+):
+    from services.accounting_service import calculate_customer_aging
+    try:
+        data = calculate_customer_aging(customer_id)
+        return {
+            "success": True,
+            "data": serialize_doc(data)
+        }
+    except ValueError as ve:
+        if "not found" in str(ve).lower():
+            raise HTTPException(status_code=404, detail=str(ve))
+        raise HTTPException(status_code=400, detail=str(ve))
+    except HTTPException:
+        raise
+    except Exception as ex:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to calculate customer aging: {ex}"
+        )
+
+
+# =========================================================
+# ROUTE: CUSTOMER STATEMENT (PARTY LEDGER / KHATA)
+# GET /accounting/customers/{customer_id}/statement
+# =========================================================
+
+@router.get("/customers/{customer_id}/statement")
+def get_customer_ledger_statement(
+    customer_id: str,
+    from_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    to_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+):
+    parsed_from = None
+    parsed_to = None
+
+    if from_date:
+        try:
+            parsed_from = datetime.strptime(from_date, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid from_date format. Use YYYY-MM-DD")
+
+    if to_date:
+        try:
+            parsed_to = datetime.strptime(to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid to_date format. Use YYYY-MM-DD")
+
+    from services.accounting_service import get_customer_statement
+    try:
+        statement = get_customer_statement(
+            customer_id=customer_id,
+            from_date=parsed_from,
+            to_date=parsed_to,
+        )
+        return {
+            "success": True,
+            "data": serialize_doc(statement)
+        }
+    except ValueError as ve:
+        if "not found" in str(ve).lower():
+            raise HTTPException(status_code=404, detail=str(ve))
+        raise HTTPException(status_code=400, detail=str(ve))
+    except HTTPException:
+        raise
+    except Exception as ex:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate customer statement: {ex}"
+        )
+
+
+# =========================================================
+# ROUTE: SINGLE ORDER RECEIPT VOUCHER
+# POST /accounting/orders/{order_id}/receipt
+# =========================================================
+
+VALID_PAYMENT_MODES = {
+    "CASH", "COD",
+    "UPI", "BANK", "BANK_TRANSFER", "ONLINE", "NEFT", "RTGS", "IMPS",
+    "CHEQUE", "DD",
+    "FINANCE", "LOAN", "NBFC"
+}
+
+def parse_optional_datetime(val):
+    if not val or not str(val).strip():
+        return None
+    if isinstance(val, datetime):
+        return val
+    s = str(val).strip()
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%d-%m-%Y", "%d/%m/%Y"):
+            try:
+                return datetime.strptime(s, fmt)
+            except Exception:
+                pass
+    return None
+
+
+class OrderReceiptRequest(BaseModel):
+    payment_mode: str
+    amount: float = Field(..., gt=0)
+    bank_account_name: Optional[str] = None
+    transaction_ref: Optional[str] = None
+    cheque_no: Optional[str] = None
+    cheque_date: Optional[Union[datetime, str]] = None
+    cheque_bank: Optional[str] = None
+    financier_name: Optional[str] = None
+    receipt_date: Optional[Union[datetime, str]] = None
+    bank_clearance_date: Optional[Union[datetime, str]] = None
+    notes: Optional[str] = None
+    collected_by_id: Optional[str] = None
+
+    @field_validator("payment_mode", mode="before")
+    @classmethod
+    def normalize_payment_mode(cls, v):
+        if not v:
+            raise ValueError("payment_mode is required")
+        v_clean = str(v).strip().upper()
+        if v_clean not in VALID_PAYMENT_MODES:
+            raise ValueError(f"Invalid payment mode '{v}'. Must be one of: Cash, UPI, Bank Transfer, Cheque, Finance")
+        return v_clean
+
+    @field_validator("receipt_date", "bank_clearance_date", mode="before")
+    @classmethod
+    def normalize_dates(cls, v):
+        return parse_optional_datetime(v)
+
+    @field_validator("cheque_date", mode="before")
+    @classmethod
+    def normalize_cheque_date(cls, v):
+        if not v or not str(v).strip():
+            return None
+        return str(v).strip()
+
+    @field_validator("bank_account_name", "transaction_ref", "cheque_no", "cheque_bank", "financier_name", "notes", "collected_by_id", mode="before")
+    @classmethod
+    def empty_string_to_none(cls, v):
+        if v is not None and isinstance(v, str) and not v.strip():
+            return None
+        return v
+
+
+@router.post("/orders/{order_id}/receipt")
+def record_single_order_receipt(
+    order_id: str,
+    data: OrderReceiptRequest,
+    current_user=Depends(get_current_user),
+):
+    """
+    Records a double-entry Receipt Voucher against a specific billed order.
+    Debits Cash / Bank / Cheques / Finance Clearing, Credits Customer Ledger,
+    and updates the order payment status to PAID or PARTIALLY_PAID.
+    """
+    user_id = "admin"
+    if isinstance(current_user, dict):
+        user_id = str(current_user.get("user_id") or current_user.get("_id") or current_user.get("id") or "admin")
+    elif current_user:
+        user_id = str(current_user)
+
+    from services.accounting_service import record_order_receipt_voucher
+    try:
+        voucher_doc, updated_order = record_order_receipt_voucher(
+            order_id=order_id,
+            user_id=user_id,
+            amount=data.amount,
+            payment_mode=data.payment_mode,
+            bank_account_name=data.bank_account_name,
+            transaction_ref=data.transaction_ref,
+            cheque_no=data.cheque_no,
+            cheque_date=data.cheque_date,
+            cheque_bank=data.cheque_bank,
+            financier_name=data.financier_name,
+            receipt_date=data.receipt_date,
+            bank_clearance_date=data.bank_clearance_date,
+            notes=data.notes,
+            collected_by_id=data.collected_by_id,
+        )
+        return {
+            "success": True,
+            "message": f"Receipt voucher {voucher_doc.get('voucher_number')} created successfully for order",
+            "voucher": serialize_doc(voucher_doc),
+            "order": serialize_doc(updated_order),
+        }
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as ex:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to record order receipt: {ex}"
+        )
+
+
+# =========================================================
+# ROUTE: CUSTOMER-LEVEL FIFO RECEIPT (LUMP-SUM SETTLEMENT)
+# POST /accounting/customers/{customer_id}/receipt
+# =========================================================
+
+class CustomerReceiptRequest(BaseModel):
+    payment_mode: str
+    amount: float = Field(..., gt=0)
+    bank_account_name: Optional[str] = None
+    transaction_ref: Optional[str] = None
+    cheque_no: Optional[str] = None
+    cheque_date: Optional[Union[datetime, str]] = None
+    cheque_bank: Optional[str] = None
+    financier_name: Optional[str] = None
+    receipt_date: Optional[Union[datetime, str]] = None
+    bank_clearance_date: Optional[Union[datetime, str]] = None
+    notes: Optional[str] = None
+    collected_by_id: Optional[str] = None
+
+    @field_validator("payment_mode", mode="before")
+    @classmethod
+    def normalize_payment_mode(cls, v):
+        if not v:
+            raise ValueError("payment_mode is required")
+        v_clean = str(v).strip().upper()
+        if v_clean not in VALID_PAYMENT_MODES:
+            raise ValueError(f"Invalid payment mode '{v}'. Must be one of: Cash, UPI, Bank Transfer, Cheque, Finance")
+        return v_clean
+
+    @field_validator("receipt_date", "bank_clearance_date", mode="before")
+    @classmethod
+    def normalize_dates(cls, v):
+        return parse_optional_datetime(v)
+
+    @field_validator("cheque_date", mode="before")
+    @classmethod
+    def normalize_cheque_date(cls, v):
+        if not v or not str(v).strip():
+            return None
+        return str(v).strip()
+
+    @field_validator("bank_account_name", "transaction_ref", "cheque_no", "cheque_bank", "financier_name", "notes", "collected_by_id", mode="before")
+    @classmethod
+    def empty_string_to_none(cls, v):
+        if v is not None and isinstance(v, str) and not v.strip():
+            return None
+        return v
+
+
+@router.post("/customers/{customer_id}/receipt")
+def settle_customer_fifo_receipt(
+    customer_id: str,
+    data: CustomerReceiptRequest,
+    current_user=Depends(get_current_user),
+):
+    """
+    Records ONE single Receipt Voucher for a customer payment (Cash, UPI, Cheque, etc.),
+    and automatically knocks off their open bills using FIFO (oldest bill first).
+    Any excess payment is held as Advance credit on the customer's ledger.
+    """
+    user_id = "admin"
+    if isinstance(current_user, dict):
+        user_id = str(current_user.get("user_id") or current_user.get("_id") or current_user.get("id") or "admin")
+    elif current_user:
+        user_id = str(current_user)
+
+    from services.accounting_service import record_customer_fifo_receipt_voucher
+    try:
+        voucher_doc, summary = record_customer_fifo_receipt_voucher(
+            customer_id=customer_id,
+            payment_mode=data.payment_mode,
+            amount=data.amount,
+            user_id=user_id,
+            bank_account_name=data.bank_account_name,
+            transaction_ref=data.transaction_ref,
+            cheque_no=data.cheque_no,
+            cheque_date=data.cheque_date,
+            cheque_bank=data.cheque_bank,
+            financier_name=data.financier_name,
+            receipt_date=data.receipt_date,
+            bank_clearance_date=data.bank_clearance_date,
+            notes=data.notes,
+            collected_by_id=data.collected_by_id,
+        )
+        return {
+            "success": True,
+            "message": f"FIFO Receipt voucher {voucher_doc.get('voucher_number')} created successfully",
+            "voucher": serialize_doc(voucher_doc),
+            "summary": serialize_doc(summary),
+        }
+    except ValueError as ve:
+        if "not found" in str(ve).lower():
+            raise HTTPException(status_code=404, detail=str(ve))
+        raise HTTPException(status_code=400, detail=str(ve))
+    except HTTPException:
+        raise
+    except Exception as ex:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to record customer receipt: {ex}"
+        )
+
+
+# =========================================================
+# ROUTE: EMPLOYEE CASH CUSTODY, OVERVIEW & HANDOVERS
+# =========================================================
+
+class CashHandoverRequest(BaseModel):
+    employee_id: str
+    amount: float = Field(..., gt=0)
+    handover_to: Literal["SAFE", "BANK"] = "SAFE"
+    bank_account_name: Optional[str] = None
+    transaction_ref: Optional[str] = None
+    handover_date: Optional[datetime] = None
+    notes: Optional[str] = None
+
+
+@router.get("/employees/cash-balances")
+def get_employees_cash_overview(
+    current_user=Depends(get_current_user),
+):
+    """
+    Returns live cash-in-hand custody breakdown for all associates/employees
+    (delivery staff, field collectors, sales reps, counter cashiers).
+    """
+    from services.accounting_service import get_all_employees_cash_balances
+    try:
+        data = get_all_employees_cash_balances()
+        return {
+            "success": True,
+            "count": len(data),
+            "data": serialize_doc(data),
+        }
+    except Exception as ex:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch employee cash balances: {ex}")
+
+
+@router.get("/employees/{employee_id}/cash-summary")
+def get_single_employee_cash_summary(
+    employee_id: str,
+    current_user=Depends(get_current_user),
+):
+    """
+    Returns single employee's cash custody status, current cash in hand,
+    and recent collection & handover ledger transactions.
+    """
+    from services.accounting_service import get_employee_cash_balance
+    try:
+        data = get_employee_cash_balance(employee_id)
+        return {
+            "success": True,
+            "data": serialize_doc(data),
+        }
+    except Exception as ex:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch employee cash summary: {ex}")
+
+
+@router.post("/employees/cash-handover")
+def record_employee_handover(
+    data: CashHandoverRequest,
+    current_user=Depends(get_current_user),
+):
+    """
+    Records an associate's physical cash handover to the company Safe or direct Bank CDM deposit.
+    Generates an automated Contra Voucher (CTV):
+      Dr Cash-in-Hand (Main Safe) or Bank Account
+      Cr Employee Cash Custody Account
+    Strictly validates that amount does not exceed the employee's current cash in hand.
+    """
+    user_id = "admin"
+    if isinstance(current_user, dict):
+        user_id = str(current_user.get("user_id") or current_user.get("_id") or current_user.get("id") or "admin")
+    elif current_user:
+        user_id = str(current_user)
+
+    from services.accounting_service import record_employee_cash_handover
+    try:
+        voucher_doc, summary = record_employee_cash_handover(
+            employee_id=data.employee_id,
+            amount=data.amount,
+            handover_to=data.handover_to,
+            handled_by_user_id=user_id,
+            bank_account_name=data.bank_account_name,
+            transaction_ref=data.transaction_ref,
+            handover_date=data.handover_date,
+            notes=data.notes,
+        )
+        return {
+            "success": True,
+            "message": f"Cash handover Contra voucher {voucher_doc.get('voucher_number')} recorded successfully",
+            "voucher": serialize_doc(voucher_doc),
+            "summary": serialize_doc(summary),
+        }
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as ex:
+        raise HTTPException(status_code=500, detail=f"Failed to record cash handover: {ex}")

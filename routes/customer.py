@@ -965,6 +965,56 @@ def get_customers(
 
     }
 
+# =========================================================
+# ROUTE: DUE CUSTOMERS LIST WITH AGING
+# GET /customer/due
+# GET /customer/aging
+# =========================================================
+
+@router.get("/due")
+@router.get("/aging")
+def get_customer_due_aging_list(
+    search: Optional[str] = Query(None, description="Search by name, custom ID, mobile, or company"),
+    branch_id: Optional[str] = Query(None, description="Filter by branch ID"),
+    assigned_employee_id: Optional[str] = Query(None, description="Filter by sales agent/employee ID"),
+    aging_bucket: Optional[str] = Query(None, description="Filter by bucket: current, days_1_30, days_31_60, days_61_90, days_90_plus, overdue"),
+    is_overdue: Optional[bool] = Query(None, description="True for overdue only, False for not overdue"),
+    min_due: Optional[float] = Query(None, description="Minimum outstanding balance"),
+    max_due: Optional[float] = Query(None, description="Maximum outstanding balance"),
+    sort_by: str = Query("total_outstanding", description="Sort by: total_outstanding, total_overdue, max_dpd, customer_name, oldest_due_date"),
+    sort_order: str = Query("desc", description="Sort order: asc or desc"),
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int = Query(20, ge=1, le=100, description="Items per page"),
+    include_bills: bool = Query(False, description="Include detailed unpaid bills list for each customer"),
+):
+    from services.accounting_service import get_due_customers_aging_list
+    from routes.accounting import serialize_doc
+    try:
+        res = get_due_customers_aging_list(
+            search=search,
+            branch_id=branch_id,
+            assigned_employee_id=assigned_employee_id,
+            aging_bucket=aging_bucket,
+            is_overdue=is_overdue,
+            min_due=min_due,
+            max_due=max_due,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            page=page,
+            limit=limit,
+            include_bills=include_bills,
+        )
+        return {
+            "status": True,
+            "success": True,
+            **serialize_doc(res)
+        }
+    except Exception as ex:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch due customers list: {ex}"
+        )
+
 # # =========================================================
 # # GET SINGLE CUSTOMER
 # # =========================================================
@@ -986,6 +1036,14 @@ def get_customer(
     customer = customers_collection.find_one({
         "id": customer_id
     })
+    if not customer and ObjectId.is_valid(customer_id):
+        customer = customers_collection.find_one({
+            "_id": ObjectId(customer_id)
+        })
+    if not customer and customer_id.upper().startswith("CUST"):
+        customer = customers_collection.find_one({
+            "id": customer_id.upper()
+        })
 
     if not customer:
 
@@ -1175,6 +1233,14 @@ def update_customer(
     existing_customer = customers_collection.find_one({
         "id": customer_id
     })
+    if not existing_customer and ObjectId.is_valid(customer_id):
+        existing_customer = customers_collection.find_one({
+            "_id": ObjectId(customer_id)
+        })
+    if not existing_customer and customer_id.upper().startswith("CUST"):
+        existing_customer = customers_collection.find_one({
+            "id": customer_id.upper()
+        })
 
     if not existing_customer:
         raise HTTPException(
