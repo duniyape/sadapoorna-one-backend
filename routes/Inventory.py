@@ -1337,13 +1337,6 @@ def get_unblocked_stock(
 # =========================================================
 
 
-VEHICLE_INVENTORY_TYPES = [
-    "warehouse_to_vehicle",
-    "sale",
-    "sale_return"
-]
-
-
 # =========================================================
 # GET VEHICLE INVENTORY (DIRECT FROM STOCK BATCHES)
 # =========================================================

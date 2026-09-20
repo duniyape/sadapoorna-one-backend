@@ -558,3 +558,24 @@ def get_profile(
             )
         }
     }
+
+
+# =========================================================
+# CUSTOMER AUTHENTICATION (WHATSAPP OTP)
+# =========================================================
+
+from routes.customer import (
+    CustomerLoginSendOTPRequest,
+    CustomerLoginVerifyOTPRequest,
+    customer_login_send_otp,
+    customer_login_verify_otp,
+)
+
+@router.post("/customer/send-otp")
+def auth_customer_send_otp(data: CustomerLoginSendOTPRequest):
+    return customer_login_send_otp(data)
+
+
+@router.post("/customer/verify-otp")
+def auth_customer_verify_otp(data: CustomerLoginVerifyOTPRequest):
+    return customer_login_verify_otp(data)

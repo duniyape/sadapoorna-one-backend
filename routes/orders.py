@@ -291,6 +291,148 @@ def build_items(items, gst_type: str, order_type: Optional[str] = None):
 
 
 # =========================================================
+# HELPER: VALIDATE SALE RETURN REQUEST
+# =========================================================
+
+def validate_sale_return_request(
+    ref_invoice_id: Optional[ObjectId],
+    items: List[Dict[str, Any]],
+    customer_id: Optional[ObjectId] = None,
+    exclude_order_id: Optional[ObjectId] = None,
+) -> Dict[str, Any]:
+    """
+    Validates sale return orders upfront during creation or item update:
+    1. Checks ref_invoice_id is provided, exists, and belongs to a billed/delivered sale order.
+    2. Validates customer_id matches original sale customer.
+    3. Validates each ref_item_id belongs to the original sale order and matches product/variant.
+    4. Calculates available returnable quantity taking into account:
+       - Total sold quantity from original sale batch consumptions (or original order item).
+       - Quantities already returned in previous billed returns.
+       - Quantities requested in other active, unbilled (pending) return orders.
+    5. Rejects if requested return quantity exceeds remaining returnable quantity.
+    Returns the original sale order doc.
+    """
+    if not ref_invoice_id:
+        raise HTTPException(
+            status_code=400,
+            detail="ref_invoice_id is required for sales return orders."
+        )
+
+    orig_order = orders_collection.find_one({"_id": ref_invoice_id})
+    if not orig_order:
+        raise HTTPException(
+            status_code=404,
+            detail="Referenced original sales invoice order not found."
+        )
+
+    if orig_order.get("type") != "sale":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Referenced order is '{orig_order.get('type')}'. Only sale orders can be returned."
+        )
+
+    # Check that original sale order has been billed / delivered
+    orig_invoice = orig_order.get("invoice_no")
+    orig_status = orig_order.get("status")
+    if not orig_invoice and orig_status not in ["Delivered", "Completed"]:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Referenced sale order '{orig_order.get('order_no')}' is not billed yet. "
+                f"Only billed / delivered orders can be returned."
+            )
+        )
+
+    if customer_id and orig_order.get("customer_id") and customer_id != orig_order.get("customer_id"):
+        raise HTTPException(
+            status_code=400,
+            detail="Customer on sales return must match the customer from the original sale order."
+        )
+
+    orig_items = {it.get("item_id"): it for it in orig_order.get("items", []) if it.get("item_id")}
+
+    # Query any other active, unbilled (pending) return orders referencing this original sale
+    pending_return_query: Dict[str, Any] = {
+        "type": "sale_return",
+        "ref_invoice_id": ref_invoice_id,
+        "record_status": "active",
+        "status": {"$nin": ["Cancelled", "Rejected"]},
+        "$or": [{"invoice_no": None}, {"invoice_no": {"$exists": False}}, {"invoice_no": ""}],
+    }
+    if exclude_order_id:
+        pending_return_query["_id"] = {"$ne": exclude_order_id}
+
+    pending_returns = list(orders_collection.find(pending_return_query, {"items": 1}))
+    pending_return_qty_map: Dict[ObjectId, float] = {}
+    for pret in pending_returns:
+        for pit in pret.get("items", []):
+            p_ref_id = pit.get("ref_item_id")
+            if p_ref_id:
+                pending_return_qty_map[p_ref_id] = pending_return_qty_map.get(p_ref_id, 0.0) + float(pit.get("quantity", 0))
+
+    # Also aggregate requested quantities in the current request per ref_item_id
+    current_request_qty_map: Dict[ObjectId, float] = {}
+    for it in items:
+        r_id = it.get("ref_item_id")
+        if r_id:
+            current_request_qty_map[r_id] = current_request_qty_map.get(r_id, 0.0) + float(it.get("quantity", 0))
+
+    for item in items:
+        ref_item_id = item.get("ref_item_id")
+        if not ref_item_id:
+            raise HTTPException(
+                status_code=400,
+                detail="ref_item_id is required for each sale return item."
+            )
+
+        orig_item = orig_items.get(ref_item_id)
+        if not orig_item:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Referenced item '{ref_item_id}' does not exist in original sale order '{orig_order.get('order_no')}'."
+            )
+
+        if item.get("product_id") != orig_item.get("product_id") or item.get("variant_id") != orig_item.get("variant_id"):
+            raise HTTPException(
+                status_code=400,
+                detail="Product and variant must match the original sold item."
+            )
+
+        # Check consumption records for this sale item
+        consumptions = list(sale_batch_consumptions_collection.find({
+            "sale_order_id": ref_invoice_id,
+            "sale_item_id": ref_item_id,
+        }))
+
+        if consumptions:
+            total_sold_qty = sum(float(c.get("quantity", 0)) for c in consumptions)
+            already_returned_qty = sum(float(c.get("returned_quantity", 0)) for c in consumptions)
+        else:
+            total_sold_qty = float(orig_item.get("quantity", 0))
+            already_returned_qty = 0.0
+
+        other_pending_qty = pending_return_qty_map.get(ref_item_id, 0.0)
+        available_to_return = round(total_sold_qty - already_returned_qty - other_pending_qty, 4)
+        req_qty = current_request_qty_map.get(ref_item_id, float(item.get("quantity", 0)))
+
+        if req_qty > available_to_return:
+            var = product_variants_collection.find_one({"_id": item.get("variant_id")}) or {}
+            var_name = var.get("name") or str(item.get("variant_id"))
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Return quantity exceeds available returnable quantity for '{var_name}' from original sale. "
+                    f"Sold: {total_sold_qty}, Already returned: {already_returned_qty}, "
+                    f"Pending return requests: {other_pending_qty}, "
+                    f"Available to return: {available_to_return}, Requested: {req_qty}."
+                )
+            )
+
+    return orig_order
+
+
+
+# =========================================================
 # SERIAL NUMBER GENERATORS
 # =========================================================
 
@@ -747,6 +889,15 @@ def create_order(
                     )
                 )
 
+    elif data.type == "sale_return":
+        orig_order_validated = validate_sale_return_request(
+            ref_invoice_id=ref_invoice_obj_id,
+            items=processed_items,
+            customer_id=customer_obj_id,
+        )
+        if not customer_obj_id and orig_order_validated.get("customer_id"):
+            customer_obj_id = orig_order_validated.get("customer_id")
+
     now = utc_now()
     order_doc = {
         "type": data.type,
@@ -1074,6 +1225,13 @@ def update_order(
 
     if data.items is not None:
         processed_items, subtotal, total_gst = build_items(data.items, gst_type, existing_order.get("type"))
+        if existing_order.get("type") == "sale_return":
+            validate_sale_return_request(
+                ref_invoice_id=update_data.get("ref_invoice_id") or existing_order.get("ref_invoice_id"),
+                items=processed_items,
+                customer_id=update_data.get("customer_id") or existing_order.get("customer_id"),
+                exclude_order_id=obj_id,
+            )
         update_data["items"] = processed_items
         update_data["subtotal"] = subtotal
         update_data["total_gst"] = total_gst

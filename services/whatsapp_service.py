@@ -158,3 +158,74 @@ def send_invoice_pdf_whatsapp(
     )
     send_resp.raise_for_status()
     return send_resp.json()
+
+
+def send_otp_template_whatsapp(
+    recipient_mobile: str,
+    otp: str,
+    template_name: Optional[str] = "custmer_otp"
+) -> Dict[str, Any]:
+    """
+    Send OTP verification message using WhatsApp Cloud API message template (custmer_otp).
+    """
+    token, phone_id, api_ver = get_whatsapp_config()
+    if not token or not phone_id:
+        raise HTTPException(
+            status_code=500,
+            detail="WhatsApp configuration is missing on the backend."
+        )
+
+    clean_number = clean_phone_number(recipient_mobile)
+    template_to_use = template_name or os.getenv("WHATSAPP_OTP_TEMPLATE", "custmer_otp")
+
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": clean_number,
+        "type": "template",
+        "template": {
+            "name": template_to_use,
+            "language": {"code": "en_US"},
+            "components": [
+                {
+                    "type": "body",
+                    "parameters": [
+                        {"type": "text", "text": str(otp)}
+                    ]
+                },
+                {
+                    "type": "button",
+                    "sub_type": "url",
+                    "index": "0",
+                    "parameters": [
+                        {"type": "text", "text": str(otp)}
+                    ]
+                }
+            ]
+        }
+    }
+
+    url = f"https://graph.facebook.com/{api_ver}/{phone_id}/messages"
+    try:
+        response = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            },
+            json=payload,
+            timeout=15
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.HTTPError as e:
+        error_details = e.response.json() if e.response else str(e)
+        raise HTTPException(
+            status_code=400,
+            detail=f"WhatsApp OTP template sending failed: {error_details}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to communicate with WhatsApp Cloud API: {str(e)}"
+        )
+

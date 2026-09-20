@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Query, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
-from typing import Optional
+from typing import Optional, List, Tuple, Dict, Any
 from datetime import datetime, timezone, timedelta
 from bson import ObjectId
 import jwt
@@ -13,13 +13,28 @@ from database import (
     users_collection,
     otp_collection
 )
-from routes.whatsapp import (send_whatsapp_otp)
+from services.whatsapp_service import (send_otp_template_whatsapp)
 
 
 router = APIRouter()
 
+
+# =========================================================
+# CUSTOMER LOGIN & OTP MODELS
+# =========================================================
+
+class CustomerLoginSendOTPRequest(BaseModel):
+    mobile: str
+
+
+class CustomerLoginVerifyOTPRequest(BaseModel):
+    mobile: str
+    otp: str
+
+
 def generate_otp():
     return str(random.randint(100000, 999999))
+
 
 def hash_otp(otp: str):
     return hashlib.sha256(otp.encode("utf-8")).hexdigest()
@@ -536,7 +551,7 @@ def create_customer(
             "expires_at": now_otp + timedelta(minutes=10)
         })
 
-        send_whatsapp_otp(phone, otp)
+        send_otp_template_whatsapp(phone, otp, "custmer_otp")
         otp_sent = True
 
     except Exception as e:
@@ -1657,6 +1672,337 @@ def update_customer(
             )
         }
     }
+
+
+def get_phone_search_variants(phone: str) -> Tuple[str, List[str]]:
+    """
+    Normalizes Indian mobile number and returns:
+    - E.164 formatted number with 91 prefix (e.g., '919876543210')
+    - List of query variants to match MongoDB representations ('9876543210', '919876543210', '+919876543210')
+    """
+    cleaned = str(phone or "").strip().replace(" ", "").replace("-", "")
+    if cleaned.startswith("+91"):
+        cleaned = cleaned[3:]
+    elif cleaned.startswith("91") and len(cleaned) == 12:
+        cleaned = cleaned[2:]
+    elif cleaned.startswith("0") and len(cleaned) == 11:
+        cleaned = cleaned[1:]
+
+    if len(cleaned) != 10 or not cleaned.isdigit() or not cleaned.startswith(("6", "7", "8", "9")):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid Indian mobile number. Must be a 10-digit number starting with 6, 7, 8, or 9."
+        )
+
+    e164_number = f"91{cleaned}"
+    variants = [
+        cleaned,
+        e164_number,
+        f"+91{cleaned}"
+    ]
+    return e164_number, variants
+
+
+def create_customer_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.now(timezone.utc) + expires_delta
+    else:
+        expire = datetime.now(timezone.utc) + timedelta(days=30)
+    to_encode["exp"] = expire
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def get_current_customer(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+) -> Dict[str, Any]:
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        customer_id = payload.get("customer_id") or payload.get("user_id")
+        if not customer_id:
+            raise HTTPException(status_code=401, detail="Invalid token payload")
+
+        query = {}
+        if ObjectId.is_valid(customer_id):
+            query = {"_id": ObjectId(customer_id)}
+        else:
+            query = {"id": customer_id}
+
+        customer = customers_collection.find_one(query)
+        if not customer:
+            raise HTTPException(status_code=404, detail="Customer account not found")
+        if customer.get("status") == "inactive":
+            raise HTTPException(status_code=403, detail="Customer account is inactive")
+        return customer
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token has expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+
+# =========================================================
+# HELPER: SEND OTP FOR CUSTOMER LOGIN
+# (Exposed via POST /auth/customer/send-otp)
+# =========================================================
+
+def customer_login_send_otp(data: CustomerLoginSendOTPRequest):
+    e164_phone, phone_variants = get_phone_search_variants(data.mobile)
+
+    customer = customers_collection.find_one({
+        "$or": [
+            {"mobile": {"$in": phone_variants}},
+            {"alternate_mobile": {"$in": phone_variants}}
+        ]
+    })
+
+    if not customer:
+        raise HTTPException(
+            status_code=404,
+            detail="Customer not registered with this mobile number. Please contact administrator or register."
+        )
+
+    if customer.get("status") == "inactive":
+        raise HTTPException(
+            status_code=403,
+            detail="Customer account is inactive. Please contact administrator."
+        )
+
+    # Invalidate existing unverified OTPs for this customer
+    otp_collection.update_many(
+        {
+            "customer_id": customer["_id"],
+            "verified": False,
+            "invalidated": False
+        },
+        {"$set": {"invalidated": True}}
+    )
+
+    otp = generate_otp()
+    now = datetime.now(timezone.utc)
+
+    otp_collection.insert_one({
+        "customer_id": customer["_id"],
+        "customer_custom_id": customer.get("id"),
+        "phone": e164_phone,
+        "otp_hash": hash_otp(otp),
+        "purpose": "customer_login",
+        "verified": False,
+        "invalidated": False,
+        "attempts": 0,
+        "created_at": now,
+        "expires_at": now + timedelta(minutes=10)
+    })
+
+    # Dispatch WhatsApp Cloud API template
+    try:
+        send_otp_template_whatsapp(
+            recipient_mobile=e164_phone,
+            otp=otp,
+            template_name="custmer_otp"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to send OTP via WhatsApp: {str(e)}"
+        )
+
+    return {
+        "status": True,
+        "message": "OTP sent successfully to your WhatsApp number",
+        "data": {
+            "mobile": e164_phone,
+            "customer_id": customer.get("id"),
+            "customer_name": customer.get("name"),
+            "otp_sent": True,
+            "expires_in": 600
+        }
+    }
+
+
+# =========================================================
+# HELPER: VERIFY OTP & LOGIN
+# (Exposed via POST /auth/customer/verify-otp)
+# =========================================================
+
+def customer_login_verify_otp(data: CustomerLoginVerifyOTPRequest):
+    e164_phone, phone_variants = get_phone_search_variants(data.mobile)
+
+    customer = customers_collection.find_one({
+        "$or": [
+            {"mobile": {"$in": phone_variants}},
+            {"alternate_mobile": {"$in": phone_variants}}
+        ]
+    })
+
+    if not customer:
+        raise HTTPException(
+            status_code=404,
+            detail="Customer not found with this mobile number."
+        )
+
+    if customer.get("status") == "inactive":
+        raise HTTPException(
+            status_code=403,
+            detail="Customer account is inactive. Please contact administrator."
+        )
+
+    otp_record = otp_collection.find_one(
+        {
+            "customer_id": customer["_id"],
+            "verified": False,
+            "invalidated": False
+        },
+        sort=[("created_at", -1)]
+    )
+
+    if not otp_record:
+        raise HTTPException(
+            status_code=400,
+            detail="OTP not found or already used. Please request a new OTP."
+        )
+
+    now = datetime.now(timezone.utc)
+    expires_at = otp_record.get("expires_at")
+    if expires_at and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+    if expires_at and now > expires_at:
+        otp_collection.update_one(
+            {"_id": otp_record["_id"]},
+            {"$set": {"invalidated": True}}
+        )
+        raise HTTPException(
+            status_code=400,
+            detail="OTP expired. Please request a new OTP."
+        )
+
+    attempts = otp_record.get("attempts", 0)
+    if attempts >= 5:
+        otp_collection.update_one(
+            {"_id": otp_record["_id"]},
+            {"$set": {"invalidated": True}}
+        )
+        raise HTTPException(
+            status_code=429,
+            detail="Too many incorrect attempts. This OTP has been invalidated. Please request a new OTP."
+        )
+
+    submitted_hash = hash_otp(data.otp.strip())
+    if submitted_hash != otp_record.get("otp_hash"):
+        otp_collection.update_one(
+            {"_id": otp_record["_id"]},
+            {"$inc": {"attempts": 1}}
+        )
+        remaining = 4 - attempts
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid OTP. {remaining} attempt(s) remaining."
+        )
+
+    # Mark OTP verified
+    otp_collection.update_one(
+        {"_id": otp_record["_id"]},
+        {"$set": {"verified": True, "verified_at": now}}
+    )
+
+    # Invalidate any other open OTP records for this customer
+    otp_collection.update_many(
+        {
+            "customer_id": customer["_id"],
+            "_id": {"$ne": otp_record["_id"]},
+            "verified": False
+        },
+        {"$set": {"invalidated": True}}
+    )
+
+    # Update customer record
+    customers_collection.update_one(
+        {"_id": customer["_id"]},
+        {
+            "$set": {
+                "phone_verified": True,
+                "phone_verified_at": now,
+                "last_login_at": now,
+                "updated_at": now
+            }
+        }
+    )
+
+    token_payload = {
+        "user_id": str(customer["_id"]),
+        "customer_id": str(customer["_id"]),
+        "custom_id": customer.get("id"),
+        "role": "customer",
+        "name": customer.get("name"),
+        "mobile": customer.get("mobile"),
+        "customer_type": customer.get("customer_type"),
+        "branch_id": customer.get("branch_id"),
+    }
+    access_token = create_customer_access_token(token_payload)
+
+    return {
+        "status": True,
+        "message": "Login successful",
+        "access_token": access_token,
+        "token_type": "bearer",
+        "expires_in": 30 * 24 * 3600,
+        "customer": {
+            "id": str(customer["_id"]),
+            "custom_id": customer.get("id"),
+            "customer_type": customer.get("customer_type"),
+            "name": customer.get("name"),
+            "company_name": customer.get("company_name"),
+            "mobile": customer.get("mobile"),
+            "alternate_mobile": customer.get("alternate_mobile"),
+            "email": customer.get("email"),
+            "billing_address": customer.get("billing_address"),
+            "shipping_address": customer.get("shipping_address"),
+            "gst_number": customer.get("gst_number"),
+            "branch_id": customer.get("branch_id"),
+            "beat_id": customer.get("beat_id"),
+            "phone_verified": True,
+            "status": customer.get("status")
+        }
+    }
+
+
+# =========================================================
+# ROUTE: GET AUTHENTICATED CUSTOMER PROFILE
+# GET /customer/profile
+# =========================================================
+
+@router.get("/profile")
+def get_authenticated_customer_profile(
+    current_customer: Dict[str, Any] = Depends(get_current_customer)
+):
+    return {
+        "status": True,
+        "message": "Customer profile retrieved successfully",
+        "data": {
+            "id": str(current_customer["_id"]),
+            "custom_id": current_customer.get("id"),
+            "customer_type": current_customer.get("customer_type"),
+            "name": current_customer.get("name"),
+            "company_name": current_customer.get("company_name"),
+            "mobile": current_customer.get("mobile"),
+            "alternate_mobile": current_customer.get("alternate_mobile"),
+            "email": current_customer.get("email"),
+            "billing_address": current_customer.get("billing_address"),
+            "shipping_address": current_customer.get("shipping_address"),
+            "gst_number": current_customer.get("gst_number"),
+            "branch_id": current_customer.get("branch_id"),
+            "beat_id": current_customer.get("beat_id"),
+            "phone_verified": current_customer.get("phone_verified", False),
+            "phone_verified_at": current_customer.get("phone_verified_at"),
+            "status": current_customer.get("status"),
+            "last_login_at": current_customer.get("last_login_at"),
+            "created_at": current_customer.get("created_at"),
+        }
+    }
+
 
 
 

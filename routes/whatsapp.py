@@ -1,131 +1,97 @@
-from fastapi import APIRouter, HTTPException, Query, Depends
-from pydantic import BaseModel
+import random
+import hashlib
 from datetime import datetime, timedelta, timezone
+from typing import Optional, Dict, Any
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from bson import ObjectId
+
 from database import (
     customers_collection,
     otp_collection
 )
-from routes.auth import (get_current_user)
-
-import requests
-import os
-import random
-import hashlib
+from services.whatsapp_service import send_otp_template_whatsapp
 
 
 router = APIRouter()
 
 
-ACCESS_TOKEN = "EAA6rtuUkSgIBOw1ZBKc0daGfX8SSbt86QetCckUtCodtMy2ZA44d9e0nrEUhZAsxaroHpX1217ROdLpkDRD1RwKa0VWMzgy5eMfIBv4WN1CYhXnAfXx7psCzgZB2xJkEZABscWDYYsKRwBHXMnfBdT905ZCLklGOnXS8tCaqsDGpoK7s5XlkOxgh4udFz67qw5aQZDZD"
-PHONE_NUMBER_ID = "670517682822062"
-WHATSAPP_URL = f"https://graph.facebook.com/v23.0/{PHONE_NUMBER_ID}/messages"
+# =========================================================
+# REQUEST MODELS
+# =========================================================
 
-
-# --------------------------------------------------
-# Request Models
-# --------------------------------------------------
 class VerifyOTPRequest(BaseModel):
     otp: str
 
 
-# --------------------------------------------------
-# Generate OTP
-# --------------------------------------------------
+# =========================================================
+# HELPER FUNCTIONS
+# =========================================================
 
-def generate_otp():
+def generate_otp() -> str:
+    """Generate a random 6-digit OTP."""
     return str(random.randint(100000, 999999))
 
 
-# --------------------------------------------------
-# Hash OTP
-# --------------------------------------------------
-def hash_otp(otp: str):
+def hash_otp(otp: str) -> str:
+    """Hash the OTP using SHA-256."""
     return hashlib.sha256(otp.encode("utf-8")).hexdigest()
 
-def normalize_indian_phone(phone: str):
-    phone = phone.strip().replace(" ", "").replace("-", "")
 
-    if phone.startswith("+91"):
-        phone = phone[3:]
-    elif phone.startswith("91") and len(phone) == 12:
-        phone = phone[2:]
-    elif phone.startswith("0") and len(phone) == 11:
-        phone = phone[1:]
+def normalize_indian_phone(phone: str) -> str:
+    """
+    Normalizes Indian mobile number to E.164 with 91 prefix (e.g., '919876543210').
+    Validates that the 10-digit number starts with 6, 7, 8, or 9.
+    """
+    cleaned = str(phone or "").strip().replace(" ", "").replace("-", "")
 
-    if len(phone) != 10 or not phone.isdigit():
+    if cleaned.startswith("+91"):
+        cleaned = cleaned[3:]
+    elif cleaned.startswith("91") and len(cleaned) == 12:
+        cleaned = cleaned[2:]
+    elif cleaned.startswith("0") and len(cleaned) == 11:
+        cleaned = cleaned[1:]
+
+    if len(cleaned) != 10 or not cleaned.isdigit() or not cleaned.startswith(("6", "7", "8", "9")):
         raise HTTPException(
             status_code=400,
-            detail="Invalid Indian mobile number"
+            detail="Invalid Indian mobile number. Must be a 10-digit number starting with 6, 7, 8, or 9."
         )
 
-    if not phone.startswith(("6", "7", "8", "9")):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid Indian mobile number"
-        )
+    return "91" + cleaned
 
-    return "91" + phone
 
-def send_whatsapp_otp(phone: str, otp: str):
-    headers = {
-        "Authorization": f"Bearer {ACCESS_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": phone,
-        "type": "template",
-        "template": {
-            "name": "custmer_otp",
-            "language": {
-                "code": "en_US"
-            },
-            "components": [
-                {
-                    "type": "body",
-                    "parameters": [
-                        {
-                            "type": "text",
-                            "text": otp
-                        }
-                    ]
-                },
-                {
-                    "type": "button",
-                    "sub_type": "url",
-                    "index": "0",
-                    "parameters": [
-                        {
-                            "type": "text",
-                            "text": otp
-                        }
-                    ]
-                }
-            ]
-        }
-    }
-    response = requests.post(
-        WHATSAPP_URL,
-        headers=headers,
-        json=payload,
-        timeout=15
+def send_whatsapp_otp(phone: str, otp: str) -> Dict[str, Any]:
+    """
+    Sends WhatsApp OTP using the centralized WhatsApp service and approved 'custmer_otp' template.
+    """
+    return send_otp_template_whatsapp(
+        recipient_mobile=phone,
+        otp=otp,
+        template_name="custmer_otp"
     )
-    result = response.json()
-    if response.status_code not in [200, 201]:
-        raise Exception(result)
-    return result
+
+
+# =========================================================
+# ROUTE: SEND OTP FOR CUSTOMER PHONE VERIFICATION
+# POST /whatsapp/send-otp/{customer_id}
+# =========================================================
 
 @router.post("/send-otp/{customer_id}")
-def send_customer_otp(
-    customer_id: str,
-    # current_user: dict = Depends(get_current_user)
-):
-    customer = customers_collection.find_one({"id": customer_id})
+def send_customer_otp(customer_id: str):
+    """
+    Sends WhatsApp OTP to verify an existing customer's phone number using custom customer ID (e.g. CUST1001) or ObjectId.
+    """
+    query: Dict[str, Any] = {"id": customer_id}
+    if ObjectId.is_valid(customer_id):
+        query = {"$or": [{"id": customer_id}, {"_id": ObjectId(customer_id)}]}
+
+    customer = customers_collection.find_one(query)
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
     phone = customer.get("mobile")
-    
     if not phone:
         raise HTTPException(status_code=400, detail="Customer mobile number not found")
 
@@ -141,17 +107,14 @@ def send_customer_otp(
             }
         }
 
+    # Invalidate previous unverified OTPs for this customer
     otp_collection.update_many(
         {
             "customer_id": customer["_id"],
             "verified": False,
             "invalidated": False
         },
-        {
-            "$set": {
-                "invalidated": True
-            }
-        }
+        {"$set": {"invalidated": True}}
     )
 
     otp = generate_otp()
@@ -159,9 +122,10 @@ def send_customer_otp(
 
     otp_collection.insert_one({
         "customer_id": customer["_id"],
-        "customer_custom_id": customer["id"],
+        "customer_custom_id": customer.get("id"),
         "phone": phone,
         "otp_hash": hash_otp(otp),
+        "purpose": "phone_verification",
         "verified": False,
         "invalidated": False,
         "attempts": 0,
@@ -171,30 +135,41 @@ def send_customer_otp(
 
     try:
         send_whatsapp_otp(phone, otp)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to send OTP: {str(e)}"
+            detail=f"Failed to send OTP via WhatsApp: {str(e)}"
         )
 
     return {
         "status": True,
         "message": "OTP sent successfully",
         "data": {
-            "customer_id": customer["id"],
+            "customer_id": customer.get("id"),
             "mobile": phone,
             "otp_sent": True,
             "expires_in": 600
         }
     }
 
+
+# =========================================================
+# ROUTE: VERIFY OTP FOR CUSTOMER PHONE VERIFICATION
+# POST /whatsapp/verify-otp/{customer_id}
+# =========================================================
+
 @router.post("/verify-otp/{customer_id}")
-def verify_customer_otp(
-    customer_id: str,
-    data: VerifyOTPRequest,
-    # current_user: dict = Depends(get_current_user)
-):
-    customer = customers_collection.find_one({"id": customer_id})
+def verify_customer_otp(customer_id: str, data: VerifyOTPRequest):
+    """
+    Verifies the WhatsApp OTP submitted for a customer's phone verification.
+    """
+    query: Dict[str, Any] = {"id": customer_id}
+    if ObjectId.is_valid(customer_id):
+        query = {"$or": [{"id": customer_id}, {"_id": ObjectId(customer_id)}]}
+
+    customer = customers_collection.find_one(query)
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
@@ -219,17 +194,15 @@ def verify_customer_otp(
     if not otp_record:
         raise HTTPException(
             status_code=400,
-            detail="OTP not found. Please request a new OTP."
+            detail="OTP not found or already used. Please request a new OTP."
         )
 
     now = datetime.now(timezone.utc)
-
-    expires_at = otp_record["expires_at"]
-
-    if expires_at.tzinfo is None:
+    expires_at = otp_record.get("expires_at")
+    if expires_at and expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
 
-    if now > expires_at:
+    if expires_at and now > expires_at:
         otp_collection.update_one(
             {"_id": otp_record["_id"]},
             {"$set": {"invalidated": True}}
@@ -240,7 +213,6 @@ def verify_customer_otp(
         )
 
     attempts = otp_record.get("attempts", 0)
-
     if attempts >= 5:
         otp_collection.update_one(
             {"_id": otp_record["_id"]},
@@ -248,31 +220,28 @@ def verify_customer_otp(
         )
         raise HTTPException(
             status_code=429,
-            detail="Too many incorrect attempts. Please request a new OTP."
+            detail="Too many incorrect attempts. This OTP has been invalidated. Please request a new OTP."
         )
 
     submitted_hash = hash_otp(data.otp.strip())
-
-    if submitted_hash != otp_record["otp_hash"]:
+    if submitted_hash != otp_record.get("otp_hash"):
         otp_collection.update_one(
             {"_id": otp_record["_id"]},
             {"$inc": {"attempts": 1}}
         )
+        remaining = 4 - attempts
         raise HTTPException(
             status_code=400,
-            detail="Invalid OTP"
+            detail=f"Invalid OTP. {remaining} attempt(s) remaining."
         )
 
+    # Mark OTP as verified
     otp_collection.update_one(
         {"_id": otp_record["_id"]},
-        {
-            "$set": {
-                "verified": True,
-                "verified_at": now
-            }
-        }
+        {"$set": {"verified": True, "verified_at": now}}
     )
 
+    # Update customer record
     customers_collection.update_one(
         {"_id": customer["_id"]},
         {
@@ -288,10 +257,11 @@ def verify_customer_otp(
         "status": True,
         "message": "Phone number verified successfully",
         "data": {
-            "customer_id": customer["id"],
-            "mobile": customer["mobile"],
+            "customer_id": customer.get("id"),
+            "mobile": customer.get("mobile"),
             "phone_verified": True,
             "phone_verified_at": now
         }
     }
+
 
