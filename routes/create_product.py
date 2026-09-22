@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
 from bson import ObjectId
+from utils import convert_utc_to_ist
 
 from database import (
     products_collection,
@@ -127,11 +128,11 @@ def create_product(data: ProductCreate):
 
     result = products_collection.insert_one(product)
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "message": "Product created successfully",
         "product_id": str(result.inserted_id)
-    }
+    })
 
 
 # =========================================================
@@ -278,11 +279,11 @@ def create_product_variant(
 
     inventory_collection.insert_one(inventory)
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "message": "Product variant created successfully",
         "variant_id": str(result.inserted_id)
-    }
+    })
 
 
 # =========================================================
@@ -410,7 +411,7 @@ def get_products(
             )
         })
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
 
         "data": data,
@@ -423,7 +424,7 @@ def get_products(
                 (total + limit - 1) // limit
             )
         }
-    }
+    })
 
 
 # =========================================================
@@ -692,7 +693,7 @@ def get_product_variants(
     # RESPONSE
     # =========================================
 
-    return {
+    return convert_utc_to_ist({
 
         "success": True,
 
@@ -726,7 +727,7 @@ def get_product_variants(
                 // limit
             )
         }
-    }
+    })
 
 
 # =========================================================
@@ -837,14 +838,14 @@ def update_product(
         }
     )
 
-    return {
+    return convert_utc_to_ist({
 
         "success": True,
 
         "message": "Product updated successfully",
 
         "product_id": product_id
-    }
+    })
 
 
 # =========================================================
@@ -1041,7 +1042,7 @@ def update_product_variant(
         }
     )
 
-    return {
+    return convert_utc_to_ist({
 
         "success": True,
 
@@ -1050,4 +1051,4 @@ def update_product_variant(
 
         "variant_id":
             variant_id
-    }
+    })

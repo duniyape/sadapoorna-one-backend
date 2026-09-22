@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field, EmailStr
 from typing import Optional
 from datetime import datetime
 from bson import ObjectId
+from utils import convert_utc_to_ist
 
 from database import vendors_collection
 
@@ -150,11 +151,11 @@ def create_vendor(vendor: VendorCreate):
 
     vendor_data["_id"] = result.inserted_id
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "message": "Vendor created successfully",
         "data": serialize_vendor(vendor_data)
-    }
+    })
 
 
 # =========================================
@@ -226,14 +227,14 @@ def get_vendors(
         for vendor in vendors
     ]
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "page": page,
         "limit": limit,
         "total": total,
         "total_pages": (total + limit - 1) // limit,
         "data": data
-    }
+    })
 
 
 # =========================================
@@ -260,10 +261,10 @@ def get_vendor(vendor_id: str):
             detail="Vendor not found"
         )
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "data": serialize_vendor(vendor)
-    }
+    })
 
 
 # =========================================
@@ -345,11 +346,11 @@ def update_vendor(
         "_id": ObjectId(vendor_id)
     })
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "message": "Vendor updated successfully",
         "data": serialize_vendor(updated_vendor)
-    }
+    })
 
 
 # =========================================
@@ -380,7 +381,7 @@ def delete_vendor(vendor_id: str):
         "_id": ObjectId(vendor_id)
     })
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "message": "Vendor deleted successfully"
-    }
+    })

@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from datetime import datetime, timezone
 from bson import ObjectId
+from utils import convert_utc_to_ist
 
 from database import access_collection, masters_collection
 
@@ -99,10 +100,10 @@ def grant_access(access: AccessGrant):
 
         message = "Access granted successfully"
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": message
-    }
+    })
 
 # =========================================================
 # GET ACCESS
@@ -121,7 +122,7 @@ def get_access(designation_id: str):
         "designation_id": designation_id
     })
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "designation_id": designation_id,
         "frontend_icons": (
@@ -129,4 +130,4 @@ def get_access(designation_id: str):
             if access
             else []
         )
-    }
+    })

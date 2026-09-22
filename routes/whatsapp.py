@@ -2,6 +2,7 @@ import random
 import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
+from utils import convert_utc_to_ist
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -98,14 +99,14 @@ def send_customer_otp(customer_id: str):
     phone = normalize_indian_phone(phone)
 
     if customer.get("phone_verified", False):
-        return {
+        return convert_utc_to_ist({
             "status": True,
             "message": "Customer phone number is already verified",
             "data": {
                 "phone_verified": True,
                 "otp_sent": False
             }
-        }
+        })
 
     # Invalidate previous unverified OTPs for this customer
     otp_collection.update_many(
@@ -143,7 +144,7 @@ def send_customer_otp(customer_id: str):
             detail=f"Failed to send OTP via WhatsApp: {str(e)}"
         )
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "OTP sent successfully",
         "data": {
@@ -152,7 +153,7 @@ def send_customer_otp(customer_id: str):
             "otp_sent": True,
             "expires_in": 600
         }
-    }
+    })
 
 
 # =========================================================
@@ -174,13 +175,13 @@ def verify_customer_otp(customer_id: str, data: VerifyOTPRequest):
         raise HTTPException(status_code=404, detail="Customer not found")
 
     if customer.get("phone_verified", False):
-        return {
+        return convert_utc_to_ist({
             "status": True,
             "message": "Phone number already verified",
             "data": {
                 "phone_verified": True
             }
-        }
+        })
 
     otp_record = otp_collection.find_one(
         {
@@ -253,7 +254,7 @@ def verify_customer_otp(customer_id: str, data: VerifyOTPRequest):
         }
     )
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "Phone number verified successfully",
         "data": {
@@ -262,6 +263,6 @@ def verify_customer_otp(customer_id: str, data: VerifyOTPRequest):
             "phone_verified": True,
             "phone_verified_at": now
         }
-    }
+    })
 
 

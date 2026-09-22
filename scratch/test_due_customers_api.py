@@ -95,7 +95,7 @@ def test_due_customers_calculation():
 
             due_date = ord_doc.get("due_date")
             if not due_date:
-                credit_days = int(ord_doc.get("credit_days") or (cust.get("credit_days") if cust else 15) or 15)
+                credit_days = int(ord_doc.get("credit_days") or (cust.get("credit_days") if cust else 7) or 7)
                 due_date = billed_at + timedelta(days=credit_days)
 
             if due_date.tzinfo is None:
@@ -151,7 +151,7 @@ def test_due_customers_calculation():
             "branch_id": str(cust.get("branch_id")) if (cust and cust.get("branch_id")) else None,
             "assigned_employee_id": str(cust.get("assigned_employee_id")) if (cust and cust.get("assigned_employee_id")) else None,
             "credit_limit": float(cust.get("credit_limit", 0.0)) if cust else 0.0,
-            "credit_days": int(cust.get("credit_days", 15)) if cust else 15,
+            "credit_days": int(cust.get("credit_days", 7)) if cust else 7,
             "total_outstanding": round(total_outstanding, 2),
             "total_overdue": round(total_overdue, 2),
             "max_dpd": max_dpd,

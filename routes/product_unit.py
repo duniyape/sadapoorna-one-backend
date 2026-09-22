@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from bson import ObjectId
+from utils import convert_utc_to_ist
 
 from database import product_units_collection
 
@@ -49,11 +50,11 @@ def create_product_unit(unit: ProductUnit):
 
     result = product_units_collection.insert_one(data)
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "Product Unit Created Successfully",
         "unit_id": str(result.inserted_id)
-    }
+    })
 
 
 # =========================================
@@ -127,11 +128,11 @@ def update_product_unit(
         }
     )
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "Product Unit Updated Successfully",
         "unit_id": unit_id
-    }
+    })
 
 
 # =========================================
@@ -170,11 +171,11 @@ def delete_product_unit(unit_id: str):
             detail="Failed to delete product unit"
         )
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "Product Unit Deleted Successfully",
         "unit_id": unit_id
-    }
+    })
 
 
 # =========================================
@@ -198,8 +199,8 @@ def get_product_units():
             "symbol": unit.get("symbol")
         })
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "count": len(data),
         "data": data
-    }
+    })

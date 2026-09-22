@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from bson import ObjectId
+from utils import convert_utc_to_ist
 
 from database import product_categories_collection, product_sub_categories_collection, product_brands_collection
 
@@ -35,11 +36,11 @@ def create_category(category: ProductCategory):
 
     result = product_categories_collection.insert_one(data)
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "Category Created Successfully",
         "category_id": str(result.inserted_id)
-    }
+    })
 
 
 # =========================================
@@ -91,11 +92,11 @@ def update_category(
         }
     )
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "Category Updated Successfully",
         "category_id": category_id
-    }
+    })
 
 
 # =========================================
@@ -134,11 +135,11 @@ def delete_category(category_id: str):
             detail="Failed to delete category"
         )
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "Category Deleted Successfully",
         "category_id": category_id
-    }
+    })
 
 
 # =========================================
@@ -161,11 +162,11 @@ def get_categories():
             "name": category.get("name")
         })
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "count": len(data),
         "data": data
-    }
+    })
 
 
 # =========================================
@@ -221,11 +222,11 @@ def create_sub_category(sub_category: ProductSubCategory):
 
     result = product_sub_categories_collection.insert_one(data)
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "Sub-category Created Successfully",
         "sub_category_id": str(result.inserted_id)
-    }
+    })
 
 
 # =========================================
@@ -300,11 +301,11 @@ def update_sub_category(
         }
     )
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "Sub-category Updated Successfully",
         "sub_category_id": sub_category_id
-    }
+    })
 
 
 # =========================================
@@ -343,11 +344,11 @@ def delete_sub_category(sub_category_id: str):
             detail="Failed to delete sub-category"
         )
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "Sub-category Deleted Successfully",
         "sub_category_id": sub_category_id
-    }
+    })
 
 
 # =========================================
@@ -390,11 +391,11 @@ def get_sub_categories(
             )
         })
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "count": len(data),
         "data": data
-    }
+    })
 
 
 # =========================================
@@ -429,11 +430,11 @@ def create_brand(brand: ProductBrand):
 
     result = product_brands_collection.insert_one(data)
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "Brand Created Successfully",
         "brand_id": str(result.inserted_id)
-    }
+    })
 
 
 # =========================================
@@ -489,11 +490,11 @@ def update_brand(
         }
     )
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "Brand Updated Successfully",
         "brand_id": brand_id
-    }
+    })
 
 
 # =========================================
@@ -532,11 +533,11 @@ def delete_brand(brand_id: str):
             detail="Failed to delete brand"
         )
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "Brand Deleted Successfully",
         "brand_id": brand_id
-    }
+    })
 
 
 # =========================================
@@ -560,8 +561,8 @@ def get_brands():
             "name": brand.get("name")
         })
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "count": len(data),
         "data": data
-    }
+    })

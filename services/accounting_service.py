@@ -22,6 +22,7 @@ from routes.voucher import generate_voucher_number
 # =========================================================
 SYS_SALES_ACCOUNT = "Sales Account"
 SYS_SALES_RETURN = "Sales Return"
+SYS_DISCOUNT_ALLOWED = "Discount Allowed"
 SYS_OUTPUT_CGST = "Output CGST"
 SYS_OUTPUT_SGST = "Output SGST"
 SYS_OUTPUT_IGST = "Output IGST"
@@ -100,6 +101,7 @@ def ensure_system_ledgers() -> Dict[str, Tuple[str, str]]:
     return {
         "sales": ensure_system_ledger(SYS_SALES_ACCOUNT, "Sales Accounts", "INCOME"),
         "sales_return": ensure_system_ledger(SYS_SALES_RETURN, "Sales Accounts", "INCOME"),
+        "discount_allowed": ensure_system_ledger(SYS_DISCOUNT_ALLOWED, "Indirect Expenses", "EXPENSES"),
         "cgst": ensure_system_ledger(SYS_OUTPUT_CGST, "Duties & Taxes", "LIABILITIES"),
         "sgst": ensure_system_ledger(SYS_OUTPUT_SGST, "Duties & Taxes", "LIABILITIES"),
         "igst": ensure_system_ledger(SYS_OUTPUT_IGST, "Duties & Taxes", "LIABILITIES"),
@@ -289,15 +291,17 @@ def create_sales_invoice_voucher(
     grand_total = round(float(order.get("grand_total", 0.0)), 2)
     total_gst = round(float(order.get("total_gst", 0.0)), 2)
     subtotal = round(float(order.get("subtotal", grand_total - total_gst)), 2)
+    discount = round(float(order.get("discount", 0.0)), 2)
 
     # Net taxable revenue
-    taxable_revenue = round(grand_total - total_gst, 2)
+    taxable_revenue = round(subtotal, 2)
 
     cust_id = str(order.get("customer_id", ""))
     cust_ledger_id, cust_ledger_name = ensure_customer_ledger(cust_id)
     sys_ledgers = ensure_system_ledgers()
 
     sales_ledger_id, sales_ledger_name = sys_ledgers["sales"]
+    discount_ledger_id, discount_ledger_name = sys_ledgers["discount_allowed"]
     now = utc_now()
     voucher_date = order.get("billed_at") or now
 
@@ -312,6 +316,16 @@ def create_sales_invoice_voucher(
         "credit": 0.0,
         "user_id": user_id,
     })
+
+    if discount > 0:
+        entries.append({
+            "ledger_id": discount_ledger_id,
+            "ledger_name": discount_ledger_name,
+            "narration": f"Discount allowed on Invoice {invoice_no}",
+            "debit": discount,
+            "credit": 0.0,
+            "user_id": user_id,
+        })
 
     # 2. CREDIT SALES REVENUE
     entries.append({
@@ -403,13 +417,17 @@ def create_sales_return_voucher(
     """
     grand_total = round(float(order.get("grand_total", 0.0)), 2)
     total_gst = round(float(order.get("total_gst", 0.0)), 2)
-    taxable_revenue = round(grand_total - total_gst, 2)
+    subtotal = round(float(order.get("subtotal", grand_total - total_gst)), 2)
+    discount = round(float(order.get("discount", 0.0)), 2)
+    
+    taxable_revenue = round(subtotal, 2)
 
     cust_id = str(order.get("customer_id", ""))
     cust_ledger_id, cust_ledger_name = ensure_customer_ledger(cust_id)
     sys_ledgers = ensure_system_ledgers()
 
     sales_ret_id, sales_ret_name = sys_ledgers["sales_return"]
+    discount_ledger_id, discount_ledger_name = sys_ledgers["discount_allowed"]
     now = utc_now()
     voucher_date = order.get("billed_at") or now
     if voucher_date.tzinfo is None:
@@ -472,6 +490,16 @@ def create_sales_return_voucher(
         "credit": grand_total,
         "user_id": user_id,
     })
+    
+    if discount > 0:
+        entries.append({
+            "ledger_id": discount_ledger_id,
+            "ledger_name": discount_ledger_name,
+            "narration": f"Discount reversed on Sales Return {invoice_no}",
+            "debit": 0.0,
+            "credit": discount,
+            "user_id": user_id,
+        })
 
     # Verify double-entry balance
     total_debit = round(sum(e["debit"] for e in entries), 2)
@@ -1070,7 +1098,7 @@ def calculate_customer_aging(customer_id: str) -> Dict[str, Any]:
         due_date = ord_doc.get("due_date")
         if not due_date:
             billed_at = ord_doc.get("billed_at") or ord_doc.get("created_at") or now
-            credit_days = int(ord_doc.get("credit_days") or (cust.get("credit_days") if cust else 15) or 15)
+            credit_days = int(ord_doc.get("credit_days") or (cust.get("credit_days") if cust else 7) or 7)
             due_date = billed_at + timedelta(days=credit_days)
 
         # Make sure due_date is timezone-aware
@@ -1120,7 +1148,7 @@ def calculate_customer_aging(customer_id: str) -> Dict[str, Any]:
         "customer_name": cust.get("name") or cust.get("company_name"),
         "phone": cust.get("mobile") or cust.get("phone"),
         "credit_limit": float(cust.get("credit_limit", 0.0)) if cust else 0.0,
-        "credit_days": int(cust.get("credit_days", 15)) if cust else 15,
+        "credit_days": int(cust.get("credit_days", 7)) if cust else 7,
         "total_outstanding": round(total_outstanding, 2),
         "total_overdue": round(total_overdue, 2),
         "max_dpd": max_dpd,
@@ -1265,7 +1293,7 @@ def get_due_customers_aging_list(
 
             due_date = ord_doc.get("due_date")
             if not due_date:
-                credit_days = int(ord_doc.get("credit_days") or (cust.get("credit_days") if cust else 15) or 15)
+                credit_days = int(ord_doc.get("credit_days") or (cust.get("credit_days") if cust else 7) or 7)
                 due_date = billed_at + timedelta(days=credit_days)
 
             if due_date.tzinfo is None:
@@ -1321,7 +1349,7 @@ def get_due_customers_aging_list(
             "branch_id": str(cust.get("branch_id")) if (cust and cust.get("branch_id")) else None,
             "assigned_employee_id": str(cust.get("assigned_employee_id")) if (cust and cust.get("assigned_employee_id")) else None,
             "credit_limit": float(cust.get("credit_limit", 0.0)) if cust else 0.0,
-            "credit_days": int(cust.get("credit_days", 15)) if cust else 15,
+            "credit_days": int(cust.get("credit_days", 7)) if cust else 7,
             "total_outstanding": round(total_outstanding, 2),
             "total_overdue": round(total_overdue, 2),
             "max_dpd": max_dpd,
@@ -1582,7 +1610,7 @@ def get_customer_statement(
             "phone": cust.get("mobile") or cust.get("phone"),
             "ledger_id": cust_ledger_id,
             "credit_limit": float(cust.get("credit_limit", 0.0)) if cust else 0.0,
-            "credit_days": int(cust.get("credit_days", 15)) if cust else 15,
+            "credit_days": int(cust.get("credit_days", 7)) if cust else 7,
         },
         "from_date": from_date,
         "to_date": to_date,

@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, EmailStr
 from datetime import datetime
 from bson import ObjectId
+from utils import convert_utc_to_ist
 
 from database import warehouses_collection
 
@@ -155,12 +156,12 @@ def create_warehouse(warehouse: Warehouse):
 
     result = warehouses_collection.insert_one(data)
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "Warehouse Created Successfully",
         "warehouse_id": str(result.inserted_id),
         "warehouse_code": warehouse_code
-    }
+    })
 
 
 # =========================================================
@@ -295,14 +296,14 @@ def get_warehouses(
             )
         })
 
-    return {
+    return convert_utc_to_ist({
 
         "status": True,
 
         "count": len(data),
 
         "data": data
-    }
+    })
 
 
 # =========================================================
@@ -422,13 +423,13 @@ def get_warehouse(
         )
     }
 
-    return {
+    return convert_utc_to_ist({
 
         "status": True,
 
         "data": data
 
-    }
+    })
 
 
 # =========================================================
@@ -554,7 +555,7 @@ def update_warehouse(
 
     )
 
-    return {
+    return convert_utc_to_ist({
 
         "status": True,
 
@@ -564,7 +565,7 @@ def update_warehouse(
 
         "warehouse_code": existing.get("code")
 
-    }
+    })
 
 # =========================================================
 # CHANGE STATUS
@@ -635,7 +636,7 @@ def change_warehouse_status(
             detail="Warehouse not found"
         )
 
-    return {
+    return convert_utc_to_ist({
 
         "status": True,
 
@@ -645,4 +646,4 @@ def change_warehouse_status(
 
         "status": status
 
-    }
+    })

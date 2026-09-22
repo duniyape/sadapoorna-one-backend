@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from datetime import datetime, timezone
 from bson import ObjectId
+from utils import convert_utc_to_ist
 
 from database import (
     users_collection,
@@ -188,12 +189,12 @@ def save_hierarchy(data: HierarchyAccess):
 
         message = "Hierarchy created successfully"
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": message,
         "manager_id": data.manager_id,
         "subordinate_ids": valid_subordinates
-    }
+    })
 
 
 
@@ -291,8 +292,8 @@ def get_access_tree(user_id: str):
 
     tree = build_tree(user_id)
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "user_id": user_id,
         "access": tree
-    }
+    })

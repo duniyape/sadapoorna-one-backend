@@ -4,6 +4,7 @@ from pydantic import BaseModel, EmailStr
 from typing import Optional, List, Tuple, Dict, Any
 from datetime import datetime, timezone, timedelta
 from bson import ObjectId
+from utils import convert_utc_to_ist
 import jwt
 import random
 import hashlib
@@ -561,7 +562,7 @@ def create_customer(
     # RESPONSE
     # =====================================================
 
-    return {
+    return convert_utc_to_ist({
 
         "status": True,
 
@@ -639,7 +640,7 @@ def create_customer(
             "phone_verified": False,
             "otp_sent": otp_sent
         }
-    }
+    })
 
 
 # =========================================================
@@ -952,7 +953,7 @@ def get_customers(
     # RESPONSE
     # =====================================================
 
-    return {
+    return convert_utc_to_ist({
 
         "status": True,
 
@@ -978,7 +979,7 @@ def get_customers(
 
         }
 
-    }
+    })
 
 # =========================================================
 # ROUTE: DUE CUSTOMERS LIST WITH AGING
@@ -1019,11 +1020,11 @@ def get_customer_due_aging_list(
             limit=limit,
             include_bills=include_bills,
         )
-        return {
+        return convert_utc_to_ist({
             "status": True,
             "success": True,
             **serialize_doc(res)
-        }
+        })
     except Exception as ex:
         raise HTTPException(
             status_code=500,
@@ -1071,7 +1072,7 @@ def get_customer(
     # RESPONSE
     # =====================================================
 
-    return {
+    return convert_utc_to_ist({
 
         "status": True,
 
@@ -1229,7 +1230,7 @@ def get_customer(
                 )
             )
         }
-    }
+    })
 
 # =========================================================
 # UPDATE CUSTOMER
@@ -1536,7 +1537,7 @@ def update_customer(
     # RESPONSE
     # =====================================================
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
 
         "message": (
@@ -1671,7 +1672,7 @@ def update_customer(
                 )
             )
         }
-    }
+    })
 
 
 def get_phone_search_variants(phone: str) -> Tuple[str, List[str]]:
@@ -1809,7 +1810,7 @@ def customer_login_send_otp(data: CustomerLoginSendOTPRequest):
             detail=f"Failed to send OTP via WhatsApp: {str(e)}"
         )
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "OTP sent successfully to your WhatsApp number",
         "data": {
@@ -1819,7 +1820,7 @@ def customer_login_send_otp(data: CustomerLoginSendOTPRequest):
             "otp_sent": True,
             "expires_in": 600
         }
-    }
+    })
 
 
 # =========================================================
@@ -1943,7 +1944,7 @@ def customer_login_verify_otp(data: CustomerLoginVerifyOTPRequest):
     }
     access_token = create_customer_access_token(token_payload)
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "Login successful",
         "access_token": access_token,
@@ -1966,7 +1967,7 @@ def customer_login_verify_otp(data: CustomerLoginVerifyOTPRequest):
             "phone_verified": True,
             "status": customer.get("status")
         }
-    }
+    })
 
 
 # =========================================================
@@ -1978,7 +1979,7 @@ def customer_login_verify_otp(data: CustomerLoginVerifyOTPRequest):
 def get_authenticated_customer_profile(
     current_customer: Dict[str, Any] = Depends(get_current_customer)
 ):
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "Customer profile retrieved successfully",
         "data": {
@@ -2001,7 +2002,7 @@ def get_authenticated_customer_profile(
             "last_login_at": current_customer.get("last_login_at"),
             "created_at": current_customer.get("created_at"),
         }
-    }
+    })
 
 
 

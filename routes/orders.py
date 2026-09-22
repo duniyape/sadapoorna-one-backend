@@ -4,6 +4,7 @@ from typing import Optional, List, Dict, Tuple, Any
 from datetime import datetime, timezone, timedelta
 from bson import ObjectId
 from zoneinfo import ZoneInfo
+from utils import convert_utc_to_ist
 import io
 from pymongo import ReturnDocument
 
@@ -68,19 +69,6 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def convert_utc_to_ist(value):
-    """Recursively convert datetime values from UTC to IST in dicts and lists."""
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return value.astimezone(IST)
-    if isinstance(value, dict):
-        return {k: convert_utc_to_ist(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [convert_utc_to_ist(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(convert_utc_to_ist(item) for item in value)
-    return value
 
 
 def get_utc_date_range(from_date: Optional[str], to_date: Optional[str]):
@@ -1015,11 +1003,11 @@ def create_order(
         raise ex
 
     enriched_order = enrich_orders_with_references([order_doc])[0]
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "message": "Order created successfully",
         "data": enriched_order,
-    }
+    })
 
 
 # =========================================================
@@ -1083,7 +1071,7 @@ def get_orders(
     orders = list(orders_collection.find(query).sort("created_at", -1).skip(skip).limit(limit))
     data = enrich_orders_with_references(orders)
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "data": data,
         "pagination": {
@@ -1092,7 +1080,7 @@ def get_orders(
             "total": total,
             "total_pages": (total + limit - 1) // limit,
         }
-    }
+    })
 
 
 # =========================================================
@@ -1107,10 +1095,10 @@ def get_order(order_id: str):
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
     enriched = enrich_orders_with_references([order])[0]
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "data": enriched,
-    }
+    })
 
 
 # =========================================================
@@ -1138,11 +1126,11 @@ def update_order(
                 {"$set": {"record_status": data.record_status, "updated_at": utc_now()}}
             )
             updated = orders_collection.find_one({"_id": obj_id})
-            return {
+            return convert_utc_to_ist({
                 "success": True,
                 "message": "Order record status updated",
                 "data": enrich_orders_with_references([updated])[0],
-            }
+            })
         raise HTTPException(status_code=400, detail="Delivered or Cancelled orders cannot be edited")
 
     # Downwards-only and physical constraints validation for Out for Delivery sale orders
@@ -1328,11 +1316,11 @@ def update_order(
             raise ex
 
     enriched_order = enrich_orders_with_references([updated_order])[0]
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "message": "Order updated successfully",
         "data": enriched_order,
-    }
+    })
 
 
 # =========================================================
@@ -1459,14 +1447,14 @@ def manual_bill_order(
         user_id=str(current_user["user_id"]),
         note=f"{order_type} billed with invoice {invoice_no}. Discount: ₹{discount:.2f}, COGS: ₹{total_cogs:.2f}",
     )
-    credit_days = 15
+    credit_days = 7
     if order.get("customer_id"):
         cust_doc = customers_collection.find_one({"_id": order["customer_id"]})
         if cust_doc and cust_doc.get("credit_days"):
             try:
                 credit_days = int(cust_doc["credit_days"])
             except Exception:
-                credit_days = 15
+                credit_days = 7
     due_date = now + timedelta(days=credit_days)
 
     # Atomic Billing Update
@@ -1561,7 +1549,7 @@ def manual_bill_order(
             }
         )
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "message": f"{'Sale' if order_type == 'sale' else 'Sales return'} billed successfully" + (" and sent via WhatsApp" if whatsapp_sent else ""),
         "order_id": order_id,
@@ -1579,7 +1567,7 @@ def manual_bill_order(
         "whatsapp_sent": whatsapp_sent,
         "whatsapp_error": whatsapp_err,
         "pdf_available": True,
-    }
+    })
 
 
 
@@ -1658,13 +1646,13 @@ def resend_bill_whatsapp(
         }
     )
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "message": f"Invoice {order.get('invoice_no')} sent successfully via WhatsApp",
         "order_id": order_id,
         "invoice_no": order.get("invoice_no"),
         "sent_at": now,
-    }
+    })
 
 
 # =========================================================
@@ -1766,11 +1754,11 @@ def update_order_status(
             raise ex
 
     enriched = enrich_orders_with_references([updated_order])[0]
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "message": "Order status updated successfully",
         "data": enriched,
-    }
+    })
 
 
 # =========================================================
@@ -1961,11 +1949,11 @@ def bulk_dispatch_orders(
         if target_vehicle_id
         else f"Updated {len(orders)} orders to '{data.status}' under Manifest {manifest_no}. Stock remains in warehouse (Option 2 - no vehicle assigned)."
     )
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "message": msg,
         "manifest": serialized_manifest,
-    }
+    })
 
 
 # =========================================================
@@ -1985,10 +1973,10 @@ def get_manifest(manifest_id_or_no: str):
     if not doc:
         raise HTTPException(status_code=404, detail="Trip manifest not found")
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "data": convert_utc_to_ist(serialize_order(doc)),
-    }
+    })
 
 
 # =========================================================
@@ -2016,7 +2004,7 @@ def list_manifests(
     cursor = delivery_manifests_collection.find(query).sort([("created_at", -1)]).skip((page_val - 1) * limit_val).limit(limit_val)
     manifests = [convert_utc_to_ist(serialize_order(m)) for m in cursor]
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "data": manifests,
         "pagination": {
@@ -2025,7 +2013,7 @@ def list_manifests(
             "total": total,
             "total_pages": (total + limit_val - 1) // limit_val if limit_val else 1,
         }
-    }
+    })
 
 
 # =========================================================
@@ -2045,11 +2033,11 @@ def update_record_status(order_id: str, data: RecordStatusUpdate):
         {"$set": {"record_status": data.record_status, "updated_at": utc_now()}}
     )
     updated = orders_collection.find_one({"_id": obj_id})
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "message": f"Order {'activated' if data.record_status == 'active' else 'inactivated'} successfully",
         "data": enrich_orders_with_references([updated])[0],
-    }
+    })
 
 
 # =========================================================
@@ -2096,10 +2084,10 @@ def get_order_batch_traceability(order_id: str):
         allocations = list(stock_batch_allocations_collection.find({"transfer_order_id": obj_id}))
         traceability_data["batch_allocations"] = serialize_value(allocations)
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "data": convert_utc_to_ist(traceability_data),
-    }
+    })
 
 
 # =========================================================
@@ -2186,14 +2174,14 @@ def get_vehicle_stock_allocations(
 
         enriched.append(item)
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "vehicle_id": str(veh_obj),
         "total": total,
         "page": page_val,
         "limit": limit_val,
         "allocations": convert_utc_to_ist(enriched),
-    }
+    })
 
 
 # =========================================================
@@ -2272,14 +2260,14 @@ def get_warehouse_stock_allocations(
 
         enriched.append(item)
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "warehouse_id": str(wh_obj),
         "total": total,
         "page": page_val,
         "limit": limit_val,
         "allocations": convert_utc_to_ist(enriched),
-    }
+    })
 
 
 # =========================================================
@@ -2294,11 +2282,11 @@ def sync_purchase_batches(current_user=Depends(get_current_user)):
     have stock batch records in the database.
     """
     synced_count = sync_existing_purchases_to_batches()
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "message": f"Successfully synced {synced_count} completed purchase orders to stock batches",
         "synced_count": synced_count,
-    }
+    })
 
 
 

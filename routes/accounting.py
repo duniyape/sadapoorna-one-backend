@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from bson import ObjectId
 from database import groups_collection, subgroups_collection, ledgers_collection
 from routes.auth import get_current_user
+from utils import convert_utc_to_ist
 
 # =========================================================
 # HELPERS
@@ -20,10 +21,10 @@ def serialize_doc(doc):
         return str(doc)
 
     if isinstance(doc, dict):
-        return {
+        return convert_utc_to_ist({
             key: serialize_doc(value)
             for key, value in doc.items()
-        }
+        })
 
     if isinstance(doc, list):
         return [
@@ -141,11 +142,11 @@ def create_group(data: GroupCreate):
 
     result = groups_collection.insert_one(group)
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "message": "Group created successfully",
         "group_id": str(result.inserted_id)
-    }
+    })
 
 
 @router.get("/groups")
@@ -171,11 +172,11 @@ def get_groups(
     for group in cursor:
         groups.append(serialize_doc(group))
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "count": len(groups),
         "data": groups
-    }
+    })
 
 
 @router.get("/groups/{group_id}")
@@ -191,10 +192,10 @@ def get_group(group_id: str):
             detail="Group not found"
         )
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "data": serialize_doc(group)
-    }
+    })
 
 
 @router.put("/groups/{group_id}")
@@ -244,10 +245,10 @@ def update_group(
         {"$set": update_data}
     )
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "message": "Group updated successfully"
-    }
+    })
 
 
 @router.delete("/groups/{group_id}")
@@ -291,10 +292,10 @@ def delete_group(group_id: str):
         "_id": gid
     })
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "message": "Group deleted successfully"
-    }
+    })
 
 
 # =========================================================
@@ -344,11 +345,11 @@ def create_subgroup(data: SubgroupCreate):
 
     result = subgroups_collection.insert_one(subgroup)
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "message": "Subgroup created successfully",
         "subgroup_id": str(result.inserted_id)
-    }
+    })
 
 
 @router.get("/subgroups")
@@ -376,11 +377,11 @@ def get_subgroups(
             serialize_doc(subgroup)
         )
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "count": len(subgroups),
         "data": subgroups
-    }
+    })
 
 
 @router.get("/subgroups/{subgroup_id}")
@@ -396,10 +397,10 @@ def get_subgroup(subgroup_id: str):
             detail="Subgroup not found"
         )
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "data": serialize_doc(subgroup)
-    }
+    })
 
 
 @router.put("/subgroups/{subgroup_id}")
@@ -475,10 +476,10 @@ def update_subgroup(
         {"$set": update_data}
     )
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "message": "Subgroup updated successfully"
-    }
+    })
 
 
 @router.delete("/subgroups/{subgroup_id}")
@@ -510,10 +511,10 @@ def delete_subgroup(subgroup_id: str):
         "_id": sid
     })
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "message": "Subgroup deleted successfully"
-    }
+    })
 
 
 # =========================================================
@@ -609,11 +610,11 @@ def create_ledger(data: LedgerCreate):
         ledger
     )
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "message": "Ledger created successfully",
         "ledger_id": str(result.inserted_id)
-    }
+    })
 
 
 @router.get("/ledgers")
@@ -654,11 +655,11 @@ def get_ledgers(
             serialize_doc(ledger)
         )
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "count": len(ledgers),
         "data": ledgers
-    }
+    })
 
 
 # =========================================================
@@ -696,11 +697,11 @@ def get_bank_accounts_ledgers_endpoint(
     cursor = ledgers_collection.find(query).sort("ledger_name", 1)
     ledgers = [serialize_doc(ledger) for ledger in cursor]
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "count": len(ledgers),
         "data": ledgers
-    }
+    })
 
 
 @router.get("/ledgers/{ledger_id}")
@@ -716,10 +717,10 @@ def get_ledger(ledger_id: str):
             detail="Ledger not found"
         )
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "data": serialize_doc(ledger)
-    }
+    })
 
 
 @router.put("/ledgers/{ledger_id}")
@@ -843,10 +844,10 @@ def update_ledger(
         {"$set": update_data}
     )
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "message": "Ledger updated successfully"
-    }
+    })
 
 
 @router.delete("/ledgers/{ledger_id}")
@@ -868,10 +869,10 @@ def delete_ledger(ledger_id: str):
         "_id": lid
     })
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "message": "Ledger deleted successfully"
-    }
+    })
 
 
 # =========================================================
@@ -911,10 +912,10 @@ def get_due_customers_list(
             limit=limit,
             include_bills=include_bills,
         )
-        return {
+        return convert_utc_to_ist({
             "success": True,
             **serialize_doc(res)
-        }
+        })
     except Exception as ex:
         raise HTTPException(
             status_code=500,
@@ -934,10 +935,10 @@ def get_customer_aging_analysis(
     from services.accounting_service import calculate_customer_aging
     try:
         data = calculate_customer_aging(customer_id)
-        return {
+        return convert_utc_to_ist({
             "success": True,
             "data": serialize_doc(data)
-        }
+        })
     except ValueError as ve:
         if "not found" in str(ve).lower():
             raise HTTPException(status_code=404, detail=str(ve))
@@ -984,10 +985,10 @@ def get_customer_ledger_statement(
             from_date=parsed_from,
             to_date=parsed_to,
         )
-        return {
+        return convert_utc_to_ist({
             "success": True,
             "data": serialize_doc(statement)
-        }
+        })
     except ValueError as ve:
         if "not found" in str(ve).lower():
             raise HTTPException(status_code=404, detail=str(ve))
@@ -1109,12 +1110,12 @@ def record_single_order_receipt(
             notes=data.notes,
             collected_by_id=data.collected_by_id,
         )
-        return {
+        return convert_utc_to_ist({
             "success": True,
             "message": f"Receipt voucher {voucher_doc.get('voucher_number')} created successfully for order",
             "voucher": serialize_doc(voucher_doc),
             "order": serialize_doc(updated_order),
-        }
+        })
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as ex:
@@ -1208,12 +1209,12 @@ def settle_customer_fifo_receipt(
             notes=data.notes,
             collected_by_id=data.collected_by_id,
         )
-        return {
+        return convert_utc_to_ist({
             "success": True,
             "message": f"FIFO Receipt voucher {voucher_doc.get('voucher_number')} created successfully",
             "voucher": serialize_doc(voucher_doc),
             "summary": serialize_doc(summary),
-        }
+        })
     except ValueError as ve:
         if "not found" in str(ve).lower():
             raise HTTPException(status_code=404, detail=str(ve))
@@ -1252,11 +1253,11 @@ def get_employees_cash_overview(
     from services.accounting_service import get_all_employees_cash_balances
     try:
         data = get_all_employees_cash_balances()
-        return {
+        return convert_utc_to_ist({
             "success": True,
             "count": len(data),
             "data": serialize_doc(data),
-        }
+        })
     except Exception as ex:
         raise HTTPException(status_code=500, detail=f"Failed to fetch employee cash balances: {ex}")
 
@@ -1273,10 +1274,10 @@ def get_single_employee_cash_summary(
     from services.accounting_service import get_employee_cash_balance
     try:
         data = get_employee_cash_balance(employee_id)
-        return {
+        return convert_utc_to_ist({
             "success": True,
             "data": serialize_doc(data),
-        }
+        })
     except Exception as ex:
         raise HTTPException(status_code=500, detail=f"Failed to fetch employee cash summary: {ex}")
 
@@ -1311,12 +1312,12 @@ def record_employee_handover(
             handover_date=data.handover_date,
             notes=data.notes,
         )
-        return {
+        return convert_utc_to_ist({
             "success": True,
             "message": f"Cash handover Contra voucher {voucher_doc.get('voucher_number')} recorded successfully",
             "voucher": serialize_doc(voucher_doc),
             "summary": serialize_doc(summary),
-        }
+        })
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as ex:

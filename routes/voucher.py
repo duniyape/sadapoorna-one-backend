@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Literal, Union
 from datetime import datetime, timezone
 from bson import ObjectId
+from utils import convert_utc_to_ist
 
 from database import (
     vouchers_collection,
@@ -144,10 +145,10 @@ def serialize_doc(doc):
         return doc
 
     if isinstance(doc, dict):
-        return {
+        return convert_utc_to_ist({
             key: serialize_doc(value)
             for key, value in doc.items()
-        }
+        })
 
     if isinstance(doc, (list, tuple, set)):
         return [
@@ -703,7 +704,7 @@ def create_voucher(
     # RESPONSE
     # =====================================================
 
-    return {
+    return convert_utc_to_ist({
 
         "success": True,
 
@@ -732,7 +733,7 @@ def create_voucher(
         "created_by": created_by,
 
         "created_at": created_at
-    }
+    })
 
 
 # =========================================================
@@ -820,14 +821,14 @@ def get_vouchers(
             serialize_doc(voucher)
         )
 
-    return {
+    return convert_utc_to_ist({
 
         "success": True,
 
         "count": len(vouchers),
 
         "data": vouchers
-    }
+    })
 
 
 # =========================================================
@@ -854,14 +855,14 @@ def get_voucher(
             detail="Voucher not found"
         )
 
-    return {
+    return convert_utc_to_ist({
 
         "success": True,
 
         "data": serialize_doc(
             voucher
         )
-    }
+    })
 
 
 # =========================================================
@@ -909,7 +910,7 @@ def delete_voucher(
             detail="Voucher could not be deleted"
         )
 
-    return {
+    return convert_utc_to_ist({
 
         "success": True,
 
@@ -920,7 +921,7 @@ def delete_voucher(
         "voucher_id": voucher_id,
 
         "deleted_by": created_by
-    }
+    })
 
 
 # =========================================================
@@ -942,11 +943,11 @@ def receive_cheque_endpoint(
             user_id=user_id,
             notes=data.notes if data else None,
         )
-        return {
+        return convert_utc_to_ist({
             "success": True,
             "message": "Physical cheque marked as RECEIVED in office safe",
             "data": serialize_doc(updated),
-        }
+        })
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -975,11 +976,11 @@ def deposit_cheque_endpoint(
             deposit_slip_ref=data.deposit_slip_ref if data else None,
             notes=data.notes if data else None,
         )
-        return {
+        return convert_utc_to_ist({
             "success": True,
             "message": "Cheque marked as DEPOSITED in bank. Awaiting CTS clearance.",
             "data": serialize_doc(updated),
-        }
+        })
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -1006,11 +1007,11 @@ def verify_voucher(
             bank_clearance_date=data.bank_clearance_date if data else None,
             notes=data.notes if data else None,
         )
-        return {
+        return convert_utc_to_ist({
             "success": True,
             "message": "Voucher verified successfully against bank records",
             "data": serialize_doc(updated),
-        }
+        })
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -1037,14 +1038,14 @@ def bounce_voucher(
             bounce_reason=data.bounce_reason,
             penalty_amount=data.penalty_amount or 0.0,
         )
-        return {
+        return convert_utc_to_ist({
             "success": True,
             "message": "Receipt voucher marked as bounced. Accounting reversal entry created and order balance restored.",
             "data": {
                 "voucher": serialize_doc(updated_voucher),
                 "reversal_voucher": serialize_doc(reversal_voucher),
             }
-        }
+        })
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -1073,7 +1074,7 @@ def batch_disburse_finance_endpoint(
             disbursement_utr=data.disbursement_utr,
             notes=data.notes,
         )
-        return {
+        return convert_utc_to_ist({
             "success": True,
             "message": f"Successfully settled {summary['batch_settled_count']} finance vouchers in batch. Master contra voucher {summary['clearance_contra_voucher_number']} created.",
             "data": {
@@ -1081,7 +1082,7 @@ def batch_disburse_finance_endpoint(
                 "summary": serialize_doc(summary),
                 "vouchers": serialize_doc(updated_vouchers),
             }
-        }
+        })
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

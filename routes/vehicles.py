@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from datetime import datetime
 from bson import ObjectId
+from utils import convert_utc_to_ist
 
 from database import vehicles_collection
 
@@ -222,12 +223,12 @@ def create_vehicle(vehicle: Vehicle):
 
     result = vehicles_collection.insert_one(data)
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "Vehicle Created Successfully",
         "vehicle_id": str(result.inserted_id),
         "vehicle_number": vehicle_number
-    }
+    })
 
 
 # =========================================================
@@ -433,11 +434,11 @@ def get_vehicles(
 
         })
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "count": len(data),
         "data": data
-    }
+    })
 
 
 # =========================================================
@@ -619,10 +620,10 @@ def get_vehicle(
 
     }
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "data": data
-    }
+    })
 
 
 # =========================================================
@@ -774,7 +775,7 @@ def update_vehicle(
 
     )
 
-    return {
+    return convert_utc_to_ist({
 
         "status": True,
 
@@ -787,7 +788,7 @@ def update_vehicle(
             existing.get("vehicle_number")
         )
 
-    }
+    })
 
 
 # =========================================================
@@ -864,7 +865,7 @@ def change_vehicle_status(
             detail="Vehicle not found"
         )
 
-    return {
+    return convert_utc_to_ist({
 
         "status": True,
 
@@ -874,4 +875,4 @@ def change_vehicle_status(
 
         "status": data.status
 
-    }
+    })

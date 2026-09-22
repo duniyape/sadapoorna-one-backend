@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from datetime import datetime
 from bson import ObjectId
+from utils import convert_utc_to_ist
 
 from database import masters_collection
 
@@ -40,11 +41,11 @@ def create_master(master: Master):
 
     result = masters_collection.insert_one(data)
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "Master Created Successfully",
         "master_id": str(result.inserted_id)
-    }
+    })
 
 
 # ==============================
@@ -99,16 +100,16 @@ def update_master(master_id: str, master: Master):
     )
 
     if result.modified_count == 0:
-        return {
+        return convert_utc_to_ist({
             "status": True,
             "message": "No changes made"
-        }
+        })
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "Master Updated Successfully",
         "master_id": master_id
-    }
+    })
 
 
 # ==============================
@@ -135,9 +136,9 @@ def get_masters_by_type(master_type: str):
             "updated_at": master.get("updated_at")
         })
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "count": len(data),
         "data": data
-    }
+    })
 

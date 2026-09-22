@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime, timezone
 from bson import ObjectId
+from utils import convert_utc_to_ist
 
 from database import (
     beats_collection,
@@ -76,7 +77,7 @@ def serialize_beat(beat):
                 or user.get("username")
             )
 
-    return {
+    return convert_utc_to_ist({
         "id": str(beat["_id"]),
         "beat_name": beat.get("beat_name"),
         "day": beat.get("day"),
@@ -93,7 +94,7 @@ def serialize_beat(beat):
             if isinstance(beat.get("updated_at"), datetime)
             else beat.get("updated_at")
         )
-    }
+    })
 
 # =========================================================
 # CREATE BEAT
@@ -168,11 +169,11 @@ def create_beat(
 
         beat["_id"] = result.inserted_id
 
-        return {
+        return convert_utc_to_ist({
             "success": True,
             "message": "Beat created successfully",
             "data": serialize_beat(beat)
-        }
+        })
 
     except HTTPException:
         raise
@@ -258,11 +259,11 @@ def get_beats(
                 serialize_beat(beat)
             )
 
-        return {
+        return convert_utc_to_ist({
             "success": True,
             "count": len(beats),
             "data": beats
-        }
+        })
 
     except HTTPException:
         raise
@@ -309,10 +310,10 @@ def get_beat(
                 detail="Beat not found"
             )
 
-        return {
+        return convert_utc_to_ist({
             "success": True,
             "data": serialize_beat(beat)
-        }
+        })
 
     except HTTPException:
         raise
@@ -465,11 +466,11 @@ def update_beat(
             "_id": object_id
         })
 
-        return {
+        return convert_utc_to_ist({
             "success": True,
             "message": "Beat updated successfully",
             "data": serialize_beat(updated_beat)
-        }
+        })
 
     except HTTPException:
         raise
@@ -508,10 +509,10 @@ def delete_beat(
                 detail="Beat not found"
             )
 
-        return {
+        return convert_utc_to_ist({
             "success": True,
             "message": "Beat deleted successfully"
-        }
+        })
 
     except HTTPException:
         raise

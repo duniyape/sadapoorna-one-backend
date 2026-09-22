@@ -4,6 +4,7 @@ from datetime import datetime
 from pwdlib import PasswordHash
 from bson import ObjectId
 from database import users_collection
+from utils import convert_utc_to_ist
 
 router = APIRouter()
 
@@ -111,12 +112,12 @@ def create_user(user: User):
     # Insert
     result = users_collection.insert_one(data)
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "User Created Successfully",
         "user_id": str(result.inserted_id),
         "employee_id": employee_id
-    }
+    })
 
 
 @router.get("/get")
@@ -398,11 +399,11 @@ def get_users():
             "updated_at": user.get("updated_at")
         })
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "count": len(data),
         "data": data
-    }
+    })
 
 
 @router.get("/get-one")
@@ -711,10 +712,10 @@ def get_user(
         "updated_at": user.get("updated_at")
     }
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "data": data
-    }
+    })
 
 
 
@@ -870,11 +871,11 @@ def update_user(user_id: str, user: UserUpdate):
     # Response
     # -----------------------------------
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "User Updated Successfully",
         "user_id": user_id,
         "employee_id": existing_user.get(
             "employee_id"
         )
-    }
+    })

@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
 from bson import ObjectId
+from utils import convert_utc_to_ist
 
 from database import packing_types_collection
 
@@ -58,11 +59,11 @@ def create_packing_type(data: PackingTypeCreate):
 
     result = packing_types_collection.insert_one(packing_type)
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "message": "Packing type created successfully",
         "packing_type_id": str(result.inserted_id)
-    }
+    })
 
 
 # =========================================
@@ -116,7 +117,7 @@ def get_packing_types(
             "updated_at": item.get("updated_at")
         })
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "data": data,
         "pagination": {
@@ -125,7 +126,7 @@ def get_packing_types(
             "total": total,
             "total_pages": (total + limit - 1) // limit
         }
-    }
+    })
 
 
 # =========================================
@@ -167,11 +168,11 @@ def delete_packing_type(packing_type_id: str):
         }
     )
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "message": "Packing type deleted successfully",
         "packing_type_id": packing_type_id
-    }
+    })
 
 
 # =========================================
@@ -249,8 +250,8 @@ def update_packing_type(
         }
     )
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "message": "Packing type updated successfully",
         "packing_type_id": packing_type_id
-    }
+    })

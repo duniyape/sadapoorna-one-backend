@@ -7,6 +7,7 @@ from fastapi import (
     File,
     Form
 )
+from utils import convert_utc_to_ist
 
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
@@ -372,15 +373,15 @@ async def whatsapp_webhook(
 
     except Exception:
 
-        return {
+        return convert_utc_to_ist({
             "status": True
-        }
+        })
 
     if data.get("object") != "whatsapp_business_account":
 
-        return {
+        return convert_utc_to_ist({
             "status": True
-        }
+        })
 
     for entry in data.get("entry", []):
 
@@ -430,9 +431,9 @@ async def whatsapp_webhook(
                     status
                 )
 
-    return {
+    return convert_utc_to_ist({
         "status": True
-    }
+    })
 
 
 # =========================================================
@@ -882,7 +883,7 @@ def get_chats(
             )
         })
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "data": result,
         "pagination": {
@@ -893,7 +894,7 @@ def get_chats(
                 total + limit - 1
             ) // limit
         }
-    }
+    })
 
 
 # =========================================================
@@ -1003,7 +1004,7 @@ def get_chat_messages(
         }
     )
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "data": result,
         "pagination": {
@@ -1011,7 +1012,7 @@ def get_chat_messages(
             "limit": limit,
             "total": total
         }
-    }
+    })
 
 
 # =========================================================
@@ -1116,7 +1117,7 @@ def send_text_message(
         incoming=False
     )
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "Message sent successfully",
         "data": {
@@ -1129,7 +1130,7 @@ def send_text_message(
             "text": data.text,
             "status": "sent"
         }
-    }
+    })
 
 
 # =========================================================
@@ -1380,7 +1381,7 @@ def send_media_message(
         incoming=False
     )
 
-    return {
+    return convert_utc_to_ist({
 
         "status": True,
 
@@ -1410,7 +1411,7 @@ def send_media_message(
             "status":
                 "sent"
         }
-    }
+    })
 
 
 # =========================================================
@@ -1445,10 +1446,10 @@ def get_media(
             detail=result
         )
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "data": result
-    }
+    })
 
 
 # =========================================================
@@ -1573,10 +1574,10 @@ def mark_chat_read(
         }
     )
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "Chat marked as read"
-    }
+    })
 
 
 # =========================================================
@@ -1615,7 +1616,7 @@ def delete_chat(
         }
     )
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "Chat deleted successfully"
-    }
+    })

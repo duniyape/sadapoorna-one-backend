@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from utils import convert_utc_to_ist
 
 from pydantic import BaseModel
 from datetime import datetime, timedelta, timezone
@@ -118,7 +119,7 @@ def get_user_related_data(user):
     # Return
     # -----------------------------------
 
-    return {
+    return convert_utc_to_ist({
 
         "department": {
             "id": user.get("department"),
@@ -156,7 +157,7 @@ def get_user_related_data(user):
                 else []
             )
         }
-    }
+    })
 
 
 def get_access_tree(user_id):
@@ -245,11 +246,11 @@ def get_access_tree(user_id):
 
     tree = build_tree(user_id)
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "user_id": user_id,
         "access": tree
-    }
+    })
 
 
 # =========================================================
@@ -351,7 +352,7 @@ def login_user(login_data: LoginRequest):
     # Response
     # -----------------------------------
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "Login Successfully",
 
@@ -400,7 +401,7 @@ def login_user(login_data: LoginRequest):
 
             "status": user.get("status")
         }
-    }
+    })
 
 # =========================================================
 # JWT AUTHENTICATION
@@ -497,7 +498,7 @@ def get_profile(
     # Response
     # -----------------------------------
 
-    return {
+    return convert_utc_to_ist({
 
         "status": True,
 
@@ -557,7 +558,7 @@ def get_profile(
                 "updated_at"
             )
         }
-    }
+    })
 
 
 # =========================================================
@@ -578,4 +579,4 @@ def auth_customer_send_otp(data: CustomerLoginSendOTPRequest):
 
 @router.post("/customer/verify-otp")
 def auth_customer_verify_otp(data: CustomerLoginVerifyOTPRequest):
-    return customer_login_verify_otp(data)
+    return customer_login_verify_otp(data)

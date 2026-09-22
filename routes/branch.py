@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from datetime import datetime
 from bson import ObjectId
 from database import branches_collection
+from utils import convert_utc_to_ist
 
 router = APIRouter()
 
@@ -54,12 +55,12 @@ def create_branch(branch: Branch):
 
     result = branches_collection.insert_one(data)
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "Branch Created Successfully",
         "branch_id": str(result.inserted_id),
         "branch_code": branch_code
-    }
+    })
 
 
 @router.get("/v1")
@@ -86,11 +87,11 @@ def get_branches():
             "updated_at": branch.get("updated_at")
         })
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "count": len(data),
         "data": data
-    }
+    })
 
 
 @router.get("/v1/{branch_id}")
@@ -112,7 +113,7 @@ def get_branch(branch_id: str):
             detail="Branch not found"
         )
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "data": {
             "id": str(branch["_id"]),
@@ -127,7 +128,7 @@ def get_branch(branch_id: str):
             "created_at": branch.get("created_at"),
             "updated_at": branch.get("updated_at")
         }
-    }
+    })
 
 @router.post("/v1/{branch_id}")
 def update_branch(branch_id: str, branch: Branch):
@@ -176,9 +177,9 @@ def update_branch(branch_id: str, branch: Branch):
         }
     )
 
-    return {
+    return convert_utc_to_ist({
         "status": True,
         "message": "Branch Updated Successfully",
         "branch_id": branch_id,
         "branch_code": existing.get("branch_code")
-    }
+    })

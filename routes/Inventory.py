@@ -1,8 +1,19 @@
 from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
 from bson import ObjectId
+from utils import convert_utc_to_ist, IST
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+
+
+
+
+def format_ist_datetime(ts) -> str:
+    if isinstance(ts, datetime) and ts != datetime.min:
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S")
+    return str(ts or "")
 from database import (
     orders_collection,
     products_collection,
@@ -95,14 +106,14 @@ def hydrate_inventory_metadata(aggregated_docs: list):
     units_map = {u["_id"]: u.get("name", "") for u in product_units_collection.find({"_id": {"$in": list(unit_ids)}})} if unit_ids else {}
     pkg_map = {p["_id"]: p.get("name", "") for p in packing_types_collection.find({"_id": {"$in": list(pkg_ids)}})} if pkg_ids else {}
 
-    return {
+    return convert_utc_to_ist({
         "products": prods_map,
         "variants": vars_map,
         "units": units_map,
         "packages": pkg_map,
         "warehouses": whs_map,
         "vehicles": vehs_map,
-    }
+    })
 
 
 # =========================================================
@@ -152,7 +163,7 @@ def get_Unallocated_inventory(
 
     aggregated = list(stock_batches_collection.aggregate(pipeline))
     if not aggregated:
-        return {
+        return convert_utc_to_ist({
             "success": True,
             "data": [],
             "pagination": {
@@ -161,7 +172,7 @@ def get_Unallocated_inventory(
                 "total": 0,
                 "total_pages": 0,
             },
-        }
+        })
 
     meta = hydrate_inventory_metadata(aggregated)
     products_map = meta["products"]
@@ -215,7 +226,7 @@ def get_Unallocated_inventory(
     total_pages = (total + limit - 1) // limit
     paginated_data = data[skip : skip + limit]
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "data": paginated_data,
         "pagination": {
@@ -224,7 +235,7 @@ def get_Unallocated_inventory(
             "total": total,
             "total_pages": total_pages,
         },
-    }
+    })
 
 # =========================================================
 
@@ -287,7 +298,7 @@ def get_warehouse_inventory(
 
     aggregated = list(stock_batches_collection.aggregate(pipeline))
     if not aggregated:
-        return {
+        return convert_utc_to_ist({
             "success": True,
             "data": [],
             "pagination": {
@@ -296,7 +307,7 @@ def get_warehouse_inventory(
                 "total": 0,
                 "total_pages": 0,
             },
-        }
+        })
 
     meta = hydrate_inventory_metadata(aggregated)
     products_map = meta["products"]
@@ -370,7 +381,7 @@ def get_warehouse_inventory(
     total_pages = (total + limit - 1) // limit
     paginated_data = data[skip : skip + limit]
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "data": paginated_data,
         "pagination": {
@@ -379,7 +390,7 @@ def get_warehouse_inventory(
             "total": total,
             "total_pages": total_pages,
         },
-    }
+    })
 
 # =========================================================
 # MAIN INVENTORY TYPES
@@ -1129,7 +1140,7 @@ def get_main_inventory(
     # RESPONSE
     # =====================================================
 
-    return {
+    return convert_utc_to_ist({
 
         "success":
             True,
@@ -1151,7 +1162,7 @@ def get_main_inventory(
             "total_pages":
                 total_pages
         }
-    }
+    })
 
 
 
@@ -1240,7 +1251,7 @@ def get_unblocked_stock(
         keys.add((pid, vid))
 
     if not keys:
-        return {
+        return convert_utc_to_ist({
             "success": True,
             "data": [],
             "pagination": {
@@ -1249,7 +1260,7 @@ def get_unblocked_stock(
                 "total": 0,
                 "total_pages": 0,
             },
-        }
+        })
 
     # 4. Bulk hydrate metadata
     dummy_agg = [{"_id": {"product_id": k[0], "variant_id": k[1]}} for k in keys]
@@ -1303,7 +1314,7 @@ def get_unblocked_stock(
     total_pages = (total + limit - 1) // limit if limit > 0 else 1
     paginated_data = data[skip : skip + limit]
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "data": paginated_data,
         "pagination": {
@@ -1312,7 +1323,7 @@ def get_unblocked_stock(
             "total": total,
             "total_pages": total_pages,
         },
-    }
+    })
 
 # =========================================================
 # VEHICLE INVENTORY
@@ -1387,7 +1398,7 @@ def get_vehicle_inventory(
 
     aggregated = list(stock_batches_collection.aggregate(pipeline))
     if not aggregated:
-        return {
+        return convert_utc_to_ist({
             "success": True,
             "data": [],
             "pagination": {
@@ -1396,7 +1407,7 @@ def get_vehicle_inventory(
                 "total": 0,
                 "total_pages": 0,
             },
-        }
+        })
 
     meta = hydrate_inventory_metadata(aggregated)
     products_map = meta["products"]
@@ -1487,7 +1498,7 @@ def get_vehicle_inventory(
     total_pages = (total + limit - 1) // limit
     paginated_data = data[skip : skip + limit]
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "data": paginated_data,
         "pagination": {
@@ -1496,7 +1507,7 @@ def get_vehicle_inventory(
             "total": total,
             "total_pages": total_pages,
         },
-    }
+    })
 
 @router.get(
     "/batch-stock",
@@ -1653,11 +1664,7 @@ def get_batch_stock(
 
         created_at = b.get("created_at")
         age_days = (now - created_at).days if isinstance(created_at, datetime) else 0
-        purchase_date_str = (
-            created_at.strftime("%Y-%m-%d %H:%M:%S")
-            if isinstance(created_at, datetime)
-            else str(created_at or "")
-        )
+        purchase_date_str = format_ist_datetime(created_at)
 
         avail_qty = float(b.get("available_quantity", 0))
         init_qty = float(b.get("initial_quantity", 0))
@@ -1718,7 +1725,7 @@ def get_batch_stock(
     total_pages = (total + limit_val - 1) // limit_val if limit_val > 0 else 1
     paginated_data = data[skip : skip + limit_val]
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "data": paginated_data,
         "summary": {
@@ -1732,7 +1739,7 @@ def get_batch_stock(
             "total": total,
             "total_pages": total_pages,
         }
-    }
+    })
 
 # =========================================================
 # STOCK LEDGER (RUNNING BALANCE & AUDIT STATEMENT)
@@ -2055,7 +2062,7 @@ def get_stock_ledger(
         user_name = u.get("name") or u.get("username") or ord_doc.get("created_by_name") or "System"
 
         ts = ev["timestamp"]
-        dt_str = ts.strftime("%Y-%m-%d %H:%M:%S") if isinstance(ts, datetime) and ts != datetime.min else str(ts)
+        dt_str = format_ist_datetime(ts)
 
         row = {
             "date": dt_str,
@@ -2100,7 +2107,7 @@ def get_stock_ledger(
     total_pages = (total + limit - 1) // limit
     paginated_data = formatted[skip : skip + limit]
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "data": paginated_data,
         "pagination": {
@@ -2109,7 +2116,7 @@ def get_stock_ledger(
             "total": total,
             "total_pages": total_pages,
         },
-    }
+    })
 
 
 # =========================================================
@@ -2234,7 +2241,7 @@ def get_batch_timeline(batch_no: str):
 
     journey.sort(key=lambda x: x.get("timestamp") or datetime.min)
 
-    return {
+    return convert_utc_to_ist({
         "success": True,
         "batch_no": clean_batch_no,
         "product_name": prod.get("name"),
@@ -2246,4 +2253,4 @@ def get_batch_timeline(batch_no: str):
         "vendor_name": vendor.get("name"),
         "current_locations": current_locations,
         "journey": journey,
-    }
+    })
