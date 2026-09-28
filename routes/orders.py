@@ -6,6 +6,7 @@ from bson import ObjectId
 from zoneinfo import ZoneInfo
 from utils import convert_utc_to_ist
 import io
+import math
 from pymongo import ReturnDocument
 
 from database import (
@@ -138,6 +139,18 @@ def create_tracking_entry(status: str, user_id: Optional[str] = None, note: Opti
     return entry
 
 
+def _handle_purchase_completion(order_doc: dict, user_id: str):
+    """Handles stock creation and accounting when a purchase order is completed."""
+    create_stock_batches_from_purchase(order_doc, user_id=user_id)
+    try:
+        from services.accounting_service import create_purchase_invoice_voucher
+        # If invoice_no is null, use order_no as reference
+        inv_no = order_doc.get("invoice_no") or order_doc.get("order_no")
+        create_purchase_invoice_voucher(order_doc, inv_no, user_id)
+    except Exception as e:
+        print(f"Warning: Could not create purchase invoice voucher: {e}")
+
+
 # =========================================================
 # VALIDATORS
 # =========================================================
@@ -236,7 +249,15 @@ def build_items(items, gst_type: str, order_type: Optional[str] = None):
             raise HTTPException(status_code=400, detail="Rate cannot be negative")
 
         gst_percent = float(variant.get("gst_percent", 0))
-        line_amount = round(quantity * rate, 2)
+        
+        rate_type = variant.get("rate_type", "per_package")
+        if rate_type == "per_unit":
+            qty_per_pkg = float(variant.get("quantity_per_package", 1.0))
+            billed_qty = quantity * qty_per_pkg
+        else:
+            billed_qty = quantity
+
+        line_amount = round(billed_qty * rate, 2)
 
         if gst_type == "including":
             if gst_percent > 0:
@@ -258,6 +279,8 @@ def build_items(items, gst_type: str, order_type: Optional[str] = None):
             "product_id": product_obj_id,
             "variant_id": variant_obj_id,
             "quantity": quantity,
+            "billingQty": billed_qty,
+            "rate_type": rate_type,
             "rate": rate,
             "gst_percent": gst_percent,
             "gst_amount": gst_amount,
@@ -605,7 +628,10 @@ def enrich_orders_with_references(orders: List[dict]) -> List[dict]:
                 "variant_name": vr.get("name") if vr else None,
                 "sku": vr.get("sku") if vr else None,
                 "quantity": item.get("quantity", 0),
+                "quantity_per_package": vr.get("quantity_per_package", 1) if vr else 1,
                 "rate": item.get("rate", 0),
+                "rate_type": item.get("rate_type", vr.get("rate_type", "per_package") if vr else "per_package"),
+                "billingQty": item.get("billingQty", item.get("quantity", 0)),
                 "gst_percent": item.get("gst_percent", 0),
                 "gst_amount": item.get("gst_amount", 0),
                 "taxable_amount": item.get("taxable_amount", 0),
@@ -930,7 +956,7 @@ def create_order(
     try:
         # If purchase is created directly as Completed -> Create Stock Batches immediately
         if data.type == "purchase" and data.status == "Completed":
-            create_stock_batches_from_purchase(order_doc, user_id=str(current_user["user_id"]))
+            _handle_purchase_completion(order_doc, user_id=str(current_user["user_id"]))
 
         # If transfer is created directly as Completed -> Move batches immediately
         if data.status == "Completed" and data.type in [
@@ -1273,7 +1299,7 @@ def update_order(
     if status_changed and data.status == "Completed":
         try:
             if updated_order.get("type") == "purchase":
-                create_stock_batches_from_purchase(updated_order, user_id=str(current_user["user_id"]))
+                _handle_purchase_completion(updated_order, user_id=str(current_user["user_id"]))
             elif updated_order.get("type") in [
                 "purchase_to_warehouse",
                 "Warehouse_IN",
@@ -1711,7 +1737,7 @@ def update_order_status(
     if data.status == "Completed":
         try:
             if updated_order.get("type") == "purchase":
-                create_stock_batches_from_purchase(updated_order, user_id=str(current_user["user_id"]))
+                _handle_purchase_completion(updated_order, user_id=str(current_user["user_id"]))
             elif updated_order.get("type") in [
                 "purchase_to_warehouse",
                 "Warehouse_IN",

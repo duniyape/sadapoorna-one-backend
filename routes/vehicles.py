@@ -4,7 +4,14 @@ from datetime import datetime
 from bson import ObjectId
 from utils import convert_utc_to_ist
 
-from database import vehicles_collection
+from database import (
+    vehicles_collection,
+    orders_collection,
+    customers_collection,
+    products_collection,
+    product_variants_collection,
+    active_routes_collection
+)
 
 
 router = APIRouter()
@@ -874,5 +881,273 @@ def change_vehicle_status(
         "vehicle_id": vehicle_id,
 
         "status": data.status
+    })
 
+import math
+
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371.0
+    dLat = math.radians(lat2 - lat1)
+    dLon = math.radians(lon2 - lon1)
+    a = math.sin(dLat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dLon / 2)**2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+# =========================================================
+# ROUTE: START ACTIVE TRIP SESSION
+# POST /vehicles/{vehicle_id}/start-trip
+# =========================================================
+
+@router.post("/{vehicle_id}/start-trip")
+def start_vehicle_trip(vehicle_id: str):
+    """
+    Locks in all 'Out for Delivery' orders into a persistent Trip Session.
+    Sorts them automatically using GPS (Nearest Neighbor).
+    """
+    if not ObjectId.is_valid(vehicle_id):
+        raise HTTPException(status_code=400, detail="Invalid vehicle_id")
+    v_oid = ObjectId(vehicle_id)
+
+    veh = vehicles_collection.find_one({"_id": v_oid})
+    if not veh:
+        raise HTTPException(status_code=404, detail="Vehicle not found")
+
+    # Check if a trip is already in progress
+    existing_trip = active_routes_collection.find_one({"vehicle_id": v_oid, "status": "in_progress"})
+    if existing_trip:
+        raise HTTPException(status_code=400, detail="A trip is already in progress for this vehicle.")
+
+    # Fetch all Out for Delivery orders assigned to this vehicle
+    query = {
+        "type": "sale",
+        "vehicle_id": v_oid,
+        "status": "Out for Delivery",
+        "record_status": "active"
+    }
+    orders = list(orders_collection.find(query))
+
+    if not orders:
+        raise HTTPException(status_code=400, detail="No 'Out for Delivery' orders found for this vehicle to start a trip.")
+
+    # Sort using Nearest Neighbor
+    located_orders = []
+    unlocated_orders = []
+    for o in orders:
+        loc = None
+        cid = o.get("customer_id")
+        if cid:
+            if isinstance(cid, str) and ObjectId.is_valid(cid):
+                cid = ObjectId(cid)
+            cust = customers_collection.find_one({"_id": cid})
+            if cust and cust.get("location") and cust["location"].get("lat") is not None:
+                loc = (cust["location"]["lat"], cust["location"]["lng"])
+        
+        if loc:
+            located_orders.append({"order": o, "loc": loc})
+        else:
+            unlocated_orders.append(o)
+
+    optimized_orders = []
+    if located_orders:
+        current = located_orders.pop(0)
+        optimized_orders.append(current["order"])
+        while located_orders:
+            nearest_idx = 0
+            min_dist = float("inf")
+            for i, target in enumerate(located_orders):
+                dist = haversine(current["loc"][0], current["loc"][1], target["loc"][0], target["loc"][1])
+                if dist < min_dist:
+                    min_dist = dist
+                    nearest_idx = i
+            current = located_orders.pop(nearest_idx)
+            optimized_orders.append(current["order"])
+
+    final_sequence = optimized_orders + unlocated_orders
+
+    # Build the manifest data to persist
+    customer_stops = []
+    trip_demand = {}
+
+    for o in final_sequence:
+        cid = o.get("customer_id")
+        cust = None
+        if cid:
+            if isinstance(cid, str) and ObjectId.is_valid(cid):
+                cid = ObjectId(cid)
+            cust = customers_collection.find_one({"_id": cid})
+
+        customer_stops.append({
+            "order_id": str(o["_id"]),
+            "order_no": o.get("order_no"),
+            "customer_name": cust.get("name") if cust else "N/A",
+            "customer_phone": cust.get("phone") or cust.get("mobile") if cust else None,
+            "address": cust.get("address") or cust.get("shipping_address") or cust.get("billing_address") if cust else None,
+            "payment_mode": o.get("payment_mode"),
+            "grand_total": round(float(o.get("grand_total", 0.0)), 2),
+            "item_count": len(o.get("items", [])),
+            "manifest_no": o.get("manifest_no"),
+        })
+
+        for it in o.get("items", []):
+            p_id = it.get("product_id")
+            v_id = it.get("variant_id")
+            if isinstance(p_id, str) and ObjectId.is_valid(p_id):
+                p_id = ObjectId(p_id)
+            if isinstance(v_id, str) and ObjectId.is_valid(v_id):
+                v_id = ObjectId(v_id)
+            qty = float(it.get("quantity", 0))
+            if p_id and v_id and qty > 0:
+                trip_demand[(p_id, v_id)] = trip_demand.get((p_id, v_id), 0.0) + qty
+
+    consolidated_items = []
+    for (p_id, v_id), total_qty in trip_demand.items():
+        prod = products_collection.find_one({"_id": p_id})
+        var = product_variants_collection.find_one({"_id": v_id})
+        consolidated_items.append({
+            "product_id": str(p_id),
+            "product_name": prod.get("name") if prod else str(p_id),
+            "variant_id": str(v_id),
+            "variant_name": var.get("name") if var else str(v_id),
+            "sku": var.get("sku") if var else "",
+            "total_quantity": round(total_qty, 4),
+        })
+
+    total_trip_amount = round(sum(float(o.get("grand_total", 0.0) or 0.0) for o in final_sequence), 2)
+
+    trip_doc = {
+        "vehicle_id": v_oid,
+        "status": "in_progress",
+        "started_at": datetime.utcnow(),
+        "customer_stops": customer_stops,
+        "consolidated_items": consolidated_items,
+        "total_trip_amount": total_trip_amount,
+        "total_orders": len(final_sequence)
+    }
+    active_routes_collection.insert_one(trip_doc)
+
+    return convert_utc_to_ist({
+        "success": True,
+        "message": "Trip successfully started and route sequence locked.",
+        "trip_id": str(trip_doc["_id"])
+    })
+
+
+# =========================================================
+# ROUTE: GET ACTIVE ROUTE
+# GET /vehicles/{vehicle_id}/active-route
+# =========================================================
+
+@router.get("/{vehicle_id}/active-route")
+def get_vehicle_active_route(vehicle_id: str):
+    """
+    Returns the locked Trip Session for the vehicle.
+    Dynamically injects the current order status so delivered orders are marked accurately.
+    """
+    if not ObjectId.is_valid(vehicle_id):
+        raise HTTPException(status_code=400, detail="Invalid vehicle_id")
+    v_oid = ObjectId(vehicle_id)
+
+    veh = vehicles_collection.find_one({"_id": v_oid})
+    if not veh:
+        raise HTTPException(status_code=404, detail="Vehicle not found")
+    veh["_id"] = str(veh["_id"])
+
+    trip = active_routes_collection.find_one({"vehicle_id": v_oid, "status": "in_progress"})
+    if not trip:
+        return convert_utc_to_ist({
+            "success": True,
+            "message": "No active trip for this vehicle.",
+            "data": {
+                "vehicle": veh,
+                "consolidated_items": [],
+                "customer_stops": [],
+                "total_trip_amount": 0.0,
+                "total_orders": 0
+            }
+        })
+
+    # Update real-time status of orders in the sequence
+    for stop in trip.get("customer_stops", []):
+        o_id = stop.get("order_id")
+        if o_id and ObjectId.is_valid(o_id):
+            o_doc = orders_collection.find_one({"_id": ObjectId(o_id)})
+            stop["current_status"] = o_doc.get("status") if o_doc else "Unknown"
+
+    trip["_id"] = str(trip["_id"])
+    trip["vehicle_id"] = str(trip["vehicle_id"])
+    trip["vehicle"] = veh
+
+    return convert_utc_to_ist({
+        "success": True,
+        "data": trip
+    })
+
+
+# =========================================================
+# ROUTE: REORDER ACTIVE ROUTE
+# POST /vehicles/{vehicle_id}/reorder-route
+# =========================================================
+
+class RouteReorderRequest(BaseModel):
+    order_ids: list[str]
+
+@router.post("/{vehicle_id}/reorder-route")
+def reorder_vehicle_active_route(vehicle_id: str, data: RouteReorderRequest):
+    """
+    Reorders the customer stops inside the active Trip Session.
+    """
+    if not ObjectId.is_valid(vehicle_id):
+        raise HTTPException(status_code=400, detail="Invalid vehicle_id")
+    v_oid = ObjectId(vehicle_id)
+
+    trip = active_routes_collection.find_one({"vehicle_id": v_oid, "status": "in_progress"})
+    if not trip:
+        raise HTTPException(status_code=404, detail="No active trip found for this vehicle to reorder.")
+
+    current_stops = trip.get("customer_stops", [])
+    stops_map = {stop["order_id"]: stop for stop in current_stops}
+
+    new_stops = []
+    for oid in data.order_ids:
+        if oid in stops_map:
+            new_stops.append(stops_map[oid])
+
+    if len(new_stops) != len(current_stops):
+        raise HTTPException(status_code=400, detail="Order IDs provided do not perfectly match the active route stops.")
+
+    active_routes_collection.update_one(
+        {"_id": trip["_id"]},
+        {"$set": {"customer_stops": new_stops}}
+    )
+
+    return convert_utc_to_ist({
+        "success": True,
+        "message": "Route sequence updated successfully."
+    })
+
+
+# =========================================================
+# ROUTE: END ACTIVE TRIP
+# POST /vehicles/{vehicle_id}/end-trip
+# =========================================================
+
+@router.post("/{vehicle_id}/end-trip")
+def end_vehicle_trip(vehicle_id: str):
+    """
+    Marks the active trip session as completed.
+    """
+    if not ObjectId.is_valid(vehicle_id):
+        raise HTTPException(status_code=400, detail="Invalid vehicle_id")
+    v_oid = ObjectId(vehicle_id)
+
+    result = active_routes_collection.update_one(
+        {"vehicle_id": v_oid, "status": "in_progress"},
+        {"$set": {"status": "completed", "ended_at": datetime.utcnow()}}
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="No active trip found to end.")
+
+    return convert_utc_to_ist({
+        "success": True,
+        "message": "Trip successfully ended."
     })

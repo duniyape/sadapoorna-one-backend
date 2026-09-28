@@ -44,6 +44,7 @@ stock_batches_collection = db["stock_batches"]
 stock_batch_allocations_collection = db["stock_batch_allocations"]
 sale_batch_consumptions_collection = db["sale_batch_consumptions"]
 delivery_manifests_collection = db["delivery_manifests"]
+active_routes_collection = db["active_routes"]
 
 # =========================================================
 # WHATSAPP INDEXES

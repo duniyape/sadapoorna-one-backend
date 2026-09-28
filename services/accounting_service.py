@@ -12,6 +12,7 @@ from database import (
     vouchers_collection,
     orders_collection,
     customers_collection,
+    vendors_collection,
     users_collection,
 )
 from routes.voucher import generate_voucher_number
@@ -26,6 +27,10 @@ SYS_DISCOUNT_ALLOWED = "Discount Allowed"
 SYS_OUTPUT_CGST = "Output CGST"
 SYS_OUTPUT_SGST = "Output SGST"
 SYS_OUTPUT_IGST = "Output IGST"
+SYS_PURCHASE_ACCOUNT = "Purchase Account"
+SYS_INPUT_CGST = "Input CGST"
+SYS_INPUT_SGST = "Input SGST"
+SYS_INPUT_IGST = "Input IGST"
 SYS_CASH_IN_HAND = "Cash in Hand"
 SYS_DEFAULT_BANK = "Bank Account (Main)"
 SYS_CHEQUES_IN_HAND = "Cheques in Hand"
@@ -105,6 +110,10 @@ def ensure_system_ledgers() -> Dict[str, Tuple[str, str]]:
         "cgst": ensure_system_ledger(SYS_OUTPUT_CGST, "Duties & Taxes", "LIABILITIES"),
         "sgst": ensure_system_ledger(SYS_OUTPUT_SGST, "Duties & Taxes", "LIABILITIES"),
         "igst": ensure_system_ledger(SYS_OUTPUT_IGST, "Duties & Taxes", "LIABILITIES"),
+        "purchases": ensure_system_ledger(SYS_PURCHASE_ACCOUNT, "Purchase Accounts", "EXPENSES"),
+        "input_cgst": ensure_system_ledger(SYS_INPUT_CGST, "Duties & Taxes", "ASSETS"),
+        "input_sgst": ensure_system_ledger(SYS_INPUT_SGST, "Duties & Taxes", "ASSETS"),
+        "input_igst": ensure_system_ledger(SYS_INPUT_IGST, "Duties & Taxes", "ASSETS"),
         "cash": ensure_system_ledger(SYS_CASH_IN_HAND, "Cash-in-Hand", "ASSETS"),
         "bank": ensure_system_ledger(SYS_DEFAULT_BANK, "Bank Accounts", "ASSETS"),
         "cheque": ensure_system_ledger(SYS_CHEQUES_IN_HAND, "Current Assets", "ASSETS"),
@@ -162,10 +171,48 @@ def resolve_customer(customer_id: Any, session=None) -> Tuple[ObjectId, dict]:
 
     return cust["_id"], cust
 
+def resolve_vendor(vendor_id: Any, session=None) -> Tuple[ObjectId, dict]:
+    """Resolves a vendor document similar to customers."""
+    if not vendor_id:
+        raise ValueError("Vendor ID is required")
 
-def ensure_customer_ledger(customer_id: str, customer_name: Optional[str] = None) -> Tuple[str, str]:
+    vend = None
+    if isinstance(vendor_id, ObjectId):
+        vend = vendors_collection.find_one({"_id": vendor_id}, session=session)
+    else:
+        vid_str = str(vendor_id).strip()
+        if not vid_str:
+            raise ValueError("Vendor ID is required")
+
+        if ObjectId.is_valid(vid_str):
+            vend = vendors_collection.find_one({"_id": ObjectId(vid_str)}, session=session)
+
+        if not vend:
+            vend = vendors_collection.find_one({"id": vid_str}, session=session)
+
+        if not vend and vid_str.upper().startswith("VEND"):
+            vend = vendors_collection.find_one({"id": vid_str.upper()}, session=session)
+
+        if not vend and not ObjectId.is_valid(vid_str):
+            vend = vendors_collection.find_one(
+                {"id": {"$regex": f"^{re.escape(vid_str)}$", "$options": "i"}},
+                session=session
+            )
+
+    if not vend:
+        raise ValueError(f"Vendor not found: {vendor_id}")
+
+    return vend["_id"], vend
+
+
+def ensure_customer_ledger(
+    customer_id: str, 
+    customer_name: Optional[str] = None, 
+    group_name: str = "Sundry Debtors", 
+    group_type: str = "ASSETS"
+) -> Tuple[str, str]:
     """
-    Finds or creates a personal ledger for a customer under 'Sundry Debtors'.
+    Finds or creates a personal ledger for a customer/vendor under the specified group.
     Stores ledger_id back onto the customer document.
     """
     try:
@@ -174,14 +221,20 @@ def ensure_customer_ledger(customer_id: str, customer_name: Optional[str] = None
         cust_oid = to_oid(customer_id)
         cust = customers_collection.find_one({"_id": cust_oid}) if cust_oid else None
     
+    name = customer_name or (cust.get("name") if cust else None) or (cust.get("company_name") if cust else None) or f"Customer/Vendor {customer_id}"
+    prefix = "Vendor" if group_name == "Sundry Creditors" else "Customer"
+    correct_ledger_name = f"{prefix} - {name}"
+
     if cust and cust.get("ledger_id"):
         led_oid = to_oid(cust["ledger_id"])
         ledger = ledgers_collection.find_one({"_id": led_oid})
         if ledger:
-            return str(ledger["_id"]), ledger["ledger_name"]
+            # Synchronize name if it got out of sync
+            if ledger.get("ledger_name") != correct_ledger_name:
+                ledgers_collection.update_one({"_id": led_oid}, {"$set": {"ledger_name": correct_ledger_name}})
+            return str(ledger["_id"]), correct_ledger_name
 
-    name = customer_name or (cust.get("name") if cust else None) or (cust.get("company_name") if cust else None) or f"Customer {customer_id}"
-    ledger_name = f"Customer - {name}"
+    ledger_name = correct_ledger_name
 
     # Check if a ledger already exists with this name
     existing = ledgers_collection.find_one({"ledger_name": ledger_name})
@@ -192,19 +245,19 @@ def ensure_customer_ledger(customer_id: str, customer_name: Optional[str] = None
         return ledger_id, existing["ledger_name"]
 
     # Provision new ledger
-    grp_id = ensure_system_group("Sundry Debtors", "ASSETS")
+    grp_id = ensure_system_group(group_name, group_type)
     now = utc_now()
     res = ledgers_collection.insert_one({
         "ledger_name": ledger_name,
         "customer_id": cust_oid,
         "group_id": grp_id,
-        "group_name": "Sundry Debtors",
-        "group_type": "ASSETS",
+        "group_name": group_name,
+        "group_type": group_type,
         "subgroup_id": None,
         "subgroup_name": None,
         "opening_balance": 0.0,
-        "opening_balance_type": "Dr",
-        "description": f"Ledger for customer {name}",
+        "opening_balance_type": "Cr" if group_type == "LIABILITIES" else "Dr",
+        "description": f"Ledger for {prefix.lower()} {name}",
         "status": "ACTIVE",
         "created_at": now,
         "updated_at": now,
@@ -213,6 +266,68 @@ def ensure_customer_ledger(customer_id: str, customer_name: Optional[str] = None
 
     if cust and cust.get("_id"):
         customers_collection.update_one({"_id": cust["_id"]}, {"$set": {"ledger_id": ledger_id}})
+
+    return ledger_id, ledger_name
+
+
+def ensure_vendor_ledger(
+    vendor_id: str, 
+    vendor_name: Optional[str] = None, 
+    group_name: str = "Sundry Creditors", 
+    group_type: str = "LIABILITIES"
+) -> Tuple[str, str]:
+    """
+    Finds or creates a personal ledger for a vendor under the specified group.
+    Stores ledger_id back onto the vendor document.
+    """
+    try:
+        vend_oid, vend = resolve_vendor(vendor_id)
+    except ValueError:
+        vend_oid = to_oid(vendor_id)
+        vend = vendors_collection.find_one({"_id": vend_oid}) if vend_oid else None
+    
+    name = vendor_name or (vend.get("business_name") if vend else None) or (vend.get("name") if vend else None) or (vend.get("company_name") if vend else None) or f"Vendor {vendor_id}"
+    correct_ledger_name = f"Vendor - {name}"
+
+    if vend and vend.get("ledger_id"):
+        led_oid = to_oid(vend["ledger_id"])
+        ledger = ledgers_collection.find_one({"_id": led_oid})
+        if ledger:
+            # Synchronize name if it got out of sync or was created incorrectly
+            if ledger.get("ledger_name") != correct_ledger_name:
+                ledgers_collection.update_one({"_id": led_oid}, {"$set": {"ledger_name": correct_ledger_name}})
+            return str(ledger["_id"]), correct_ledger_name
+
+    ledger_name = correct_ledger_name
+
+    existing = ledgers_collection.find_one({"ledger_name": ledger_name})
+    if existing:
+        ledger_id = str(existing["_id"])
+        if vend and vend.get("_id"):
+            vendors_collection.update_one({"_id": vend["_id"]}, {"$set": {"ledger_id": ledger_id}})
+        return ledger_id, existing["ledger_name"]
+
+    grp_id = ensure_system_group(group_name, group_type)
+    now = utc_now()
+    res = ledgers_collection.insert_one({
+        "ledger_name": ledger_name,
+        "customer_id": vend_oid,  # Kept as customer_id for backwards compat in generic ledgers
+        "group_id": grp_id,
+        "group_name": group_name,
+        "group_type": group_type,
+        "subgroup_id": None,
+        "subgroup_name": None,
+        "opening_balance": 0.0,
+        "opening_balance_type": "Cr" if group_type == "LIABILITIES" else "Dr",
+        "description": f"Ledger for vendor {name}",
+        "status": "ACTIVE",
+        "created_at": now,
+        "updated_at": now,
+    })
+    ledger_id = str(res.inserted_id)
+
+    if vend and vend.get("_id"):
+        vendors_collection.update_one({"_id": vend["_id"]}, {"$set": {"ledger_id": ledger_id}})
 
     return ledger_id, ledger_name
 
@@ -388,6 +503,115 @@ def create_sales_invoice_voucher(
         "date": voucher_date,
         "date_key": voucher_date.strftime("%Y-%m-%d"),
         "narration": f"Sales Invoice {invoice_no} for Order {order.get('order_no', '')}",
+        "amount": grand_total,
+        "entries": entries,
+        "created_by": user_id,
+        "created_at": now,
+    }
+
+    insert_kwargs = {"session": session} if session else {}
+    vouchers_collection.insert_one(voucher_doc, **insert_kwargs)
+    return voucher_doc
+def create_purchase_invoice_voucher(
+    order: dict,
+    invoice_no: str,
+    user_id: str,
+    session=None,
+) -> dict:
+    """
+    Creates the Purchase Voucher upon confirming a purchase order.
+    Accrual principle: Cr Vendor Ledger (Grand Total)
+                       Dr Purchase Account (Taxable Subtotal)
+                       Dr Input GST (CGST/SGST or IGST)
+    """
+    grand_total = round(float(order.get("grand_total", 0.0)), 2)
+    total_gst = round(float(order.get("total_gst", 0.0)), 2)
+    subtotal = round(float(order.get("subtotal", grand_total - total_gst)), 2)
+
+    # Net taxable purchase
+    taxable_purchase = round(subtotal, 2)
+
+    vendor_id = str(order.get("vendor_id", ""))
+    vendor_ledger_id, vendor_ledger_name = ensure_vendor_ledger(vendor_id)
+    sys_ledgers = ensure_system_ledgers()
+
+    purchase_ledger_id, purchase_ledger_name = sys_ledgers["purchases"]
+    now = utc_now()
+    voucher_date = order.get("billed_at") or now
+
+    entries = []
+
+    # 1. CREDIT VENDOR (Full Invoice Value)
+    entries.append({
+        "ledger_id": vendor_ledger_id,
+        "ledger_name": vendor_ledger_name,
+        "narration": f"Purchase Invoice {invoice_no} against Order {order.get('order_no', '')}",
+        "debit": 0.0,
+        "credit": grand_total,
+        "user_id": user_id,
+    })
+
+    # 2. DEBIT PURCHASE ACCOUNT
+    entries.append({
+        "ledger_id": purchase_ledger_id,
+        "ledger_name": purchase_ledger_name,
+        "narration": f"Purchases against Invoice {invoice_no}",
+        "debit": taxable_purchase,
+        "credit": 0.0,
+        "user_id": user_id,
+    })
+
+    # 3. DEBIT GST ACCOUNTS
+    if total_gst > 0:
+        half_gst = round(total_gst / 2.0, 2)
+        other_half = round(total_gst - half_gst, 2)
+
+        cgst_id, cgst_name = sys_ledgers["input_cgst"]
+        sgst_id, sgst_name = sys_ledgers["input_sgst"]
+
+        entries.append({
+            "ledger_id": cgst_id,
+            "ledger_name": cgst_name,
+            "narration": f"Input CGST for Invoice {invoice_no}",
+            "debit": half_gst,
+            "credit": 0.0,
+            "user_id": user_id,
+        })
+        entries.append({
+            "ledger_id": sgst_id,
+            "ledger_name": sgst_name,
+            "narration": f"Input SGST for Invoice {invoice_no}",
+            "debit": other_half,
+            "credit": 0.0,
+            "user_id": user_id,
+        })
+
+    # Verify double-entry balance
+    total_debit = round(sum(e["debit"] for e in entries), 2)
+    total_credit = round(sum(e["credit"] for e in entries), 2)
+
+    # Adjust rounding cents if any discrepancy between total_debit & total_credit
+    diff = round(total_credit - total_debit, 2)
+    if diff != 0:
+        entries[1]["debit"] = round(entries[1]["debit"] + diff, 2)
+
+    voucher_number, txn = generate_voucher_number(
+        voucher_type="Purchase",
+        voucher_mode="Credit",
+        voucher_date=voucher_date,
+    )
+
+    voucher_doc = {
+        "voucher_number": voucher_number,
+        "voucher_type": "Purchase",
+        "voucher_mode": "Credit",
+        "txn": txn,
+        "order_id": order["_id"],
+        "invoice_no": invoice_no,
+        "customer_id": order.get("customer_id"),
+        "date": voucher_date,
+        "date_key": voucher_date.strftime("%Y-%m-%d"),
+        "narration": f"Purchase Invoice {invoice_no} for Order {order.get('order_no', '')}",
         "amount": grand_total,
         "entries": entries,
         "created_by": user_id,
@@ -2023,9 +2247,19 @@ def verify_receipt_voucher(
     clearance_dt = bank_clearance_date or voucher.get("bank_clearance_date") or voucher.get("date") or now
     if isinstance(clearance_dt, str):
         try:
-            clearance_dt = datetime.fromisoformat(clearance_dt)
+            clearance_dt = datetime.fromisoformat(clearance_dt.replace("Z", "+00:00"))
         except Exception:
-            pass
+            for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%d-%m-%Y"):
+                try:
+                    clearance_dt = datetime.strptime(clearance_dt, fmt)
+                    break
+                except Exception:
+                    pass
+
+    # If the date was passed without a time (e.g. from a date picker), 
+    # inject the current time to preserve chronological ordering in statements.
+    if isinstance(clearance_dt, datetime) and clearance_dt.hour == 0 and clearance_dt.minute == 0 and clearance_dt.second == 0:
+        clearance_dt = clearance_dt.replace(hour=now.hour, minute=now.minute, second=now.second, microsecond=now.microsecond)
 
     update_data = {
         "verification_status": "VERIFIED",
@@ -2038,9 +2272,16 @@ def verify_receipt_voucher(
         existing_notes = voucher.get("notes") or ""
         update_data["notes"] = f"{existing_notes} | Verified: {notes}".strip(" | ")
 
+    pm = (voucher.get("payment_mode") or "").upper()
+    
+    # If it is a direct bank/UPI transfer (not a cheque), the accounting date should 
+    # perfectly match the bank clearance date so statements reconcile exactly.
+    if pm in ["UPI", "BANK", "BANK_TRANSFER", "ONLINE", "NEFT", "RTGS"]:
+        update_data["date"] = clearance_dt
+        update_data["date_key"] = clearance_dt.strftime("%Y-%m-%d")
+
     # For Cheque / DD receipts initially sitting in Cheques in Hand:
     # Automatically generate a Contra Voucher (CTV) transferring funds: Cheques in Hand -> Bank Account
-    pm = (voucher.get("payment_mode") or "").upper()
     if pm in ["CHEQUE", "DD"] and not voucher.get("clearance_contra_voucher_id"):
         dep_bank_name = voucher.get("deposit_bank_name") or SYS_DEFAULT_BANK
         sys_ledgers = ensure_system_ledgers()
@@ -2311,6 +2552,11 @@ def batch_disburse_finance_vouchers(
                     break
                 except Exception:
                     pass
+    
+    # If the date was passed without a time (e.g. from a date picker), 
+    # inject the current time to preserve chronological ordering in statements.
+    if isinstance(clearance_dt, datetime) and clearance_dt.hour == 0 and clearance_dt.minute == 0 and clearance_dt.second == 0:
+        clearance_dt = clearance_dt.replace(hour=now.hour, minute=now.minute, second=now.second, microsecond=now.microsecond)
 
     # Pro-rata subvention breakdown per voucher
     allocated_subv_sum = 0.0

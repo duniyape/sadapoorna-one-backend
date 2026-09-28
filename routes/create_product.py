@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, Literal
 from datetime import datetime
 from bson import ObjectId
 from utils import convert_utc_to_ist
@@ -57,10 +57,13 @@ class ProductVariantCreate(BaseModel):
     packaging_type_id: str
 
     # Quantity
-    quantity: float = Field(gt=0)
+    quantity_per_package: float = Field(gt=0)
 
     # Unit
     unit_id: str
+
+    # Rate Type
+    rate_type: Literal["per_package", "per_unit"]
 
     # SKU
     sku: str
@@ -234,9 +237,11 @@ def create_product_variant(
 
         "packaging_type_id": packaging_type_object_id,
 
-        "quantity": data.quantity,
+        "quantity_per_package": data.quantity_per_package,
 
         "unit_id": unit_object_id,
+        
+        "rate_type": data.rate_type,
 
         "sku": data.sku,
 
@@ -627,11 +632,13 @@ def get_product_variants(
 
             "packaging_type": packaging_data,
 
-            "quantity": variant.get(
-                "quantity"
+            "quantity_per_package": variant.get(
+                "quantity_per_package"
             ),
 
             "unit": unit_data,
+            
+            "rate_type": variant.get("rate_type"),
 
             "sku": variant.get(
                 "sku"
@@ -985,10 +992,13 @@ def update_product_variant(
         "packaging_type_id":
             packaging_type_object_id,
 
-        "quantity": data.quantity,
+        "quantity_per_package": data.quantity_per_package,
 
         "unit_id":
             unit_object_id,
+            
+        "rate_type":
+            data.rate_type,
 
         "sku": data.sku,
 
