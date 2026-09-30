@@ -1704,8 +1704,18 @@ def get_customer_statement(
     cust_oid, cust = resolve_customer(customer_id)
     cust_ledger_id, cust_ledger_name = ensure_customer_ledger(str(cust_oid))
 
+    ledger = ledgers_collection.find_one({"_id": ObjectId(cust_ledger_id)}) if ObjectId.is_valid(cust_ledger_id) else None
+    base_opening_balance = 0.0
+    if ledger:
+        ob_amount = float(ledger.get("opening_balance", 0.0))
+        ob_type = (ledger.get("opening_balance_type") or "").upper()
+        if ob_type == "CREDIT":
+            base_opening_balance -= ob_amount
+        else:
+            base_opening_balance += ob_amount
+
     # 1. Compute Opening Balance prior to from_date
-    opening_balance = 0.0
+    opening_balance = base_opening_balance
     if from_date:
         if from_date.tzinfo is None:
             from_date = from_date.replace(tzinfo=timezone.utc)

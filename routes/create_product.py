@@ -845,6 +845,27 @@ def update_product(
         }
     )
 
+    # -----------------------------------------
+    # Update product variants unit_id
+    # -----------------------------------------
+
+    unit = product_units_collection.find_one({
+        "symbol": data.base_unit
+    })
+
+    if unit:
+        product_variants_collection.update_many(
+            {
+                "product_id": product_object_id
+            },
+            {
+                "$set": {
+                    "unit_id": unit["_id"],
+                    "updated_at": datetime.utcnow()
+                }
+            }
+        )
+
     return convert_utc_to_ist({
 
         "success": True,

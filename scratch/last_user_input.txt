@@ -1,0 +1,15 @@
+<USER_REQUEST>
+
+</USER_REQUEST>
+<ADDITIONAL_METADATA>
+The current local time is: 2026-09-28T17:33:24+05:30.
+
+The user's current state is as follows:
+Active Document: c:\Users\sadapoorna\OneDrive\Desktop\workspace\sadapoorna\sadapoorna-one-backend\scratch\migrate_firebase_customers.py (LANGUAGE_PYTHON)
+Cursor is on line: 1
+Other open documents:
+- c:\Users\sadapoorna\OneDrive\Desktop\workspace\sadapoorna\sadapoorna-one-backend\scratch\migrate_firebase_customers.py (LANGUAGE_PYTHON)
+- c:\Users\sadapoorna\OneDrive\Desktop\workspace\sadapoorna\sadapoorna-one-backend\routes\orders.py (LANGUAGE_PYTHON)
+Running terminal commands:
+- python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload (in c:\Users\sadapoorna\OneDrive\Desktop\workspace\sadapoorna\sadapoorna-one-backend, running for 39s)
+</ADDITIONAL_METADATA>
