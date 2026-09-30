@@ -1053,6 +1053,7 @@ def get_orders(
     vendor_id: Optional[str] = None,
     customer_id: Optional[str] = None,
     vehicle_id: Optional[str] = None,
+    assigned_employee_id: Optional[str] = Query(None, description="Filter by employee IDs (comma separated)"),
     from_date: Optional[str] = Query(None, description="Start date YYYY-MM-DD in IST"),
     to_date: Optional[str] = Query(None, description="End date YYYY-MM-DD in IST"),
 ):
@@ -1089,6 +1090,13 @@ def get_orders(
         query["customer_id"] = validate_object_id(customer_id, "customer_id")
     if vehicle_id:
         query["vehicle_id"] = validate_object_id(vehicle_id, "vehicle_id")
+
+    if assigned_employee_id:
+        employee_ids = [eid.strip() for eid in assigned_employee_id.split(",") if eid.strip()]
+        if len(employee_ids) == 1:
+            query["assigned_employee_id"] = validate_object_id(employee_ids[0], "assigned_employee_id")
+        elif len(employee_ids) > 1:
+            query["assigned_employee_id"] = {"$in": [validate_object_id(eid, "assigned_employee_id") for eid in employee_ids]}
 
     if from_date or to_date:
         query["created_at"] = get_utc_date_range(from_date, to_date)

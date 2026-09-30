@@ -1290,6 +1290,8 @@ def get_unblocked_stock(
             "sku": var.get("sku"),
             "unit": unit_str,
             "package": pkg_str,
+            "selling_price": var.get("selling_price"),
+            "mrp": var.get("mrp"),
             "available_quantity": avail_qty,
             "blocked_quantity": blocked_qty,
             "unblocked_quantity": unblocked_qty,

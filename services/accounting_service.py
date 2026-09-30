@@ -1596,8 +1596,8 @@ def get_due_customers_aging_list(
         filtered_customers = [c for c in filtered_customers if c.get("branch_id") == b_str]
 
     if assigned_employee_id:
-        e_str = str(assigned_employee_id).strip()
-        filtered_customers = [c for c in filtered_customers if c.get("assigned_employee_id") == e_str]
+        e_ids = [e.strip() for e in str(assigned_employee_id).split(",") if e.strip()]
+        filtered_customers = [c for c in filtered_customers if c.get("assigned_employee_id") in e_ids]
 
     if search:
         s = search.strip().lower()

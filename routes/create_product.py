@@ -70,7 +70,7 @@ class ProductVariantCreate(BaseModel):
 
     # Prices
     selling_price: float = Field(ge=0)
-    purchase_price: float = Field(ge=0)
+    mrp: float = Field(ge=0)
 
     # GST
     gst_percent: float = Field(
@@ -247,7 +247,7 @@ def create_product_variant(
 
         "selling_price": data.selling_price,
 
-        "purchase_price": data.purchase_price,
+        "mrp": data.mrp,
 
         "gst_percent": data.gst_percent,
 
@@ -648,8 +648,8 @@ def get_product_variants(
                 "selling_price"
             ),
 
-            "purchase_price": variant.get(
-                "purchase_price"
+            "mrp": variant.get(
+                "mrp"
             ),
 
             "gst_percent": variant.get(
@@ -1026,8 +1026,8 @@ def update_product_variant(
         "selling_price":
             data.selling_price,
 
-        "purchase_price":
-            data.purchase_price,
+        "mrp":
+            data.mrp,
 
         "gst_percent":
             data.gst_percent,
