@@ -20,8 +20,18 @@ from routes.whatsapp_webhook import router as whatsapp_router
 from routes.beat import router as beat_router
 from routes.accounting import router as accounting_router
 from routes.voucher import router as voucher_router
+from routes.location import router as location_router
 
+from fastapi.middleware.cors import CORSMiddleware
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.include_router(router, prefix="/auth", tags=["Auth"])
 app.include_router(users, prefix="/users", tags=["Users"])
@@ -44,6 +54,7 @@ app.include_router(whatsapp_router, prefix="/whatsapp-webhook", tags=["WhatsApp 
 app.include_router(beat_router, prefix="/beats", tags=["Beat Management"])
 app.include_router(accounting_router, prefix="/accounting", tags=["Accounting"])
 app.include_router(voucher_router, prefix="/accounting/vouchers", tags=["Accounting Vouchers"])
+app.include_router(location_router)
 
 
 @app.get("/")
