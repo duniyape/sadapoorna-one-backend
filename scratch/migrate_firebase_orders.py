@@ -34,7 +34,8 @@ def migrate_orders():
             order = {
                 "type": "sale",
                 "record_status": "active",
-                "customer_id": customer_id_str,
+                "status": "delivered",
+                "customer_id": bson.ObjectId(customer_id_str),
                 "invoice_no": "OPENING-BAL",
                 "billed_at": now,
                 "created_at": now,
@@ -44,8 +45,8 @@ def migrate_orders():
                 "pending_amount": ledger["opening_balance"],
                 "credit_days": 0,
                 "items": [{"name": "Opening Balance", "amount": ledger["opening_balance"]}],
-                "branch_id": cust.get("branch_id"),
-                "assigned_employee_id": cust.get("assigned_employee_id"),
+                "branch_id": bson.ObjectId(cust.get("branch_id")) if isinstance(cust.get("branch_id"), str) and len(cust.get("branch_id")) == 24 else cust.get("branch_id"),
+                "assigned_employee_id": bson.ObjectId(cust.get("assigned_employee_id")) if isinstance(cust.get("assigned_employee_id"), str) and len(cust.get("assigned_employee_id")) == 24 else cust.get("assigned_employee_id"),
             }
             orders_collection.insert_one(order)
             created += 1
