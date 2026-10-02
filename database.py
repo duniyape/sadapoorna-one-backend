@@ -1,14 +1,19 @@
 import os
 from pymongo import MongoClient
 
-MONGO_URL = os.getenv(
-    "MONGO_URL",
-    "mongodb+srv://igold:gold0011@igold.eazpfbp.mongodb.net/?retryWrites=true&w=majority&appName=igold"
-)
+MONGO_URL ="mongodb+srv://igold:gold0011@igold.eazpfbp.mongodb.net/?retryWrites=true&w=majority&appName=igold"
 
 client = MongoClient(MONGO_URL)
+ENVIRONMENT = os.getenv("ENVIRONMENT", "local")
 
-db = client["sadapoorna_local"]
+if ENVIRONMENT == "production":
+    DB_NAME = "sadapoorna_production"
+else:
+    DB_NAME = "sadapoorna_local"
+
+
+db = client[DB_NAME]
+
 
 users_collection = db["users"]
 masters_collection = db["masters"]
