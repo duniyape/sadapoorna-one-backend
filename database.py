@@ -4,12 +4,9 @@ from pymongo import MongoClient
 MONGO_URL ="mongodb+srv://igold:gold0011@igold.eazpfbp.mongodb.net/?retryWrites=true&w=majority&appName=igold"
 
 client = MongoClient(MONGO_URL)
-ENVIRONMENT = os.getenv("ENVIRONMENT", "local")
 
-if ENVIRONMENT == "production":
-    DB_NAME = "sadapoorna_production"
-else:
-    DB_NAME = "sadapoorna_local"
+# DB_NAME = "sadapoorna_local"
+DB_NAME = "sadapoorna_production"
 
 
 db = client[DB_NAME]
