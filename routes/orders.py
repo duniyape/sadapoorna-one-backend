@@ -1556,32 +1556,32 @@ def manual_bill_order(
     # Automated WhatsApp Notification
     whatsapp_sent = False
     whatsapp_err = None
-    try:
-        send_invoice_template_whatsapp(enriched_order)
-        whatsapp_sent = True
-        orders_collection.update_one(
-            {"_id": obj_id},
-            {
-                "$set": {
-                    "invoice_whatsapp_sent": True,
-                    "invoice_whatsapp_status": "sent",
-                    "invoice_whatsapp_sent_at": utc_now(),
-                    "invoice_whatsapp_error": None,
-                }
-            }
-        )
-    except Exception as ex:
-        whatsapp_err = str(ex)
-        orders_collection.update_one(
-            {"_id": obj_id},
-            {
-                "$set": {
-                    "invoice_whatsapp_sent": False,
-                    "invoice_whatsapp_status": "failed",
-                    "invoice_whatsapp_error": whatsapp_err,
-                }
-            }
-        )
+    # try:
+    #     send_invoice_template_whatsapp(enriched_order)
+    #     whatsapp_sent = True
+    #     orders_collection.update_one(
+    #         {"_id": obj_id},
+    #         {
+    #             "$set": {
+    #                 "invoice_whatsapp_sent": True,
+    #                 "invoice_whatsapp_status": "sent",
+    #                 "invoice_whatsapp_sent_at": utc_now(),
+    #                 "invoice_whatsapp_error": None,
+    #             }
+    #         }
+    #     )
+    # except Exception as ex:
+    #     whatsapp_err = str(ex)
+    #     orders_collection.update_one(
+    #         {"_id": obj_id},
+    #         {
+    #             "$set": {
+    #                 "invoice_whatsapp_sent": False,
+    #                 "invoice_whatsapp_status": "failed",
+    #                 "invoice_whatsapp_error": whatsapp_err,
+    #             }
+    #         }
+    #     )
 
     return convert_utc_to_ist({
         "success": True,

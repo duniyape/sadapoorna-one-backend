@@ -10,7 +10,9 @@ from database import (
     customers_collection,
     products_collection,
     product_variants_collection,
-    active_routes_collection
+    active_routes_collection,
+    users_collection,
+    db
 )
 
 
@@ -883,22 +885,22 @@ def change_vehicle_status(
         "status": data.status
     })
 
-import math
-
-def haversine(lat1, lon1, lat2, lon2):
-    R = 6371.0
-    dLat = math.radians(lat2 - lat1)
-    dLon = math.radians(lon2 - lon1)
-    a = math.sin(dLat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dLon / 2)**2
-    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+from geopy.distance import geodesic
+from ortools.constraint_solver import routing_enums_pb2
+from ortools.constraint_solver import pywrapcp
 
 # =========================================================
 # ROUTE: START ACTIVE TRIP SESSION
 # POST /vehicles/{vehicle_id}/start-trip
 # =========================================================
 
+class StartTripRequest(BaseModel):
+    order_ids: list[str]
+    start_address_id: str | None = None
+    end_address_id: str | None = None
+
 @router.post("/{vehicle_id}/start-trip")
-def start_vehicle_trip(vehicle_id: str):
+def start_vehicle_trip(vehicle_id: str, data: StartTripRequest):
     """
     Locks in all 'Out for Delivery' orders into a persistent Trip Session.
     Sorts them automatically using GPS (Nearest Neighbor).
@@ -916,8 +918,17 @@ def start_vehicle_trip(vehicle_id: str):
     if existing_trip:
         raise HTTPException(status_code=400, detail="A trip is already in progress for this vehicle.")
 
-    # Fetch all Out for Delivery orders assigned to this vehicle
+    if not data.order_ids:
+        raise HTTPException(status_code=400, detail="No orders provided for the trip.")
+
+    order_oids = [ObjectId(oid) for oid in data.order_ids if ObjectId.is_valid(oid)]
+
+    if not order_oids:
+        raise HTTPException(status_code=400, detail="Provided order IDs are invalid.")
+
+    # Fetch selected Out for Delivery orders assigned to this vehicle
     query = {
+        "_id": {"$in": order_oids},
         "type": "sale",
         "vehicle_id": v_oid,
         "status": "Out for Delivery",
@@ -946,20 +957,92 @@ def start_vehicle_trip(vehicle_id: str):
         else:
             unlocated_orders.append(o)
 
+    start_lat = None
+    start_lng = None
+    end_lat = None
+    end_lng = None
+    
+    if data.start_address_id and ObjectId.is_valid(data.start_address_id):
+        start_addr = db["addresses"].find_one({"_id": ObjectId(data.start_address_id)})
+        if start_addr and start_addr.get("latitude") is not None and start_addr.get("longitude") is not None:
+            start_lat = float(start_addr["latitude"])
+            start_lng = float(start_addr["longitude"])
+            
+    if data.end_address_id and ObjectId.is_valid(data.end_address_id):
+        end_addr = db["addresses"].find_one({"_id": ObjectId(data.end_address_id)})
+        if end_addr and end_addr.get("latitude") is not None and end_addr.get("longitude") is not None:
+            end_lat = float(end_addr["latitude"])
+            end_lng = float(end_addr["longitude"])
+
     optimized_orders = []
     if located_orders:
-        current = located_orders.pop(0)
-        optimized_orders.append(current["order"])
-        while located_orders:
-            nearest_idx = 0
-            min_dist = float("inf")
-            for i, target in enumerate(located_orders):
-                dist = haversine(current["loc"][0], current["loc"][1], target["loc"][0], target["loc"][1])
-                if dist < min_dist:
-                    min_dist = dist
-                    nearest_idx = i
-            current = located_orders.pop(nearest_idx)
-            optimized_orders.append(current["order"])
+        has_start_end = start_lat is not None and start_lng is not None and end_lat is not None and end_lng is not None
+        
+        if len(located_orders) <= 2 and not has_start_end:
+            for lo in located_orders:
+                optimized_orders.append(lo["order"])
+        else:
+            try:
+                route_nodes = []
+                if has_start_end:
+                    route_nodes.append({"loc": (start_lat, start_lng), "type": "start"})
+                
+                for lo in located_orders:
+                    route_nodes.append({"loc": lo["loc"], "type": "order", "order": lo["order"]})
+                
+                if has_start_end:
+                    route_nodes.append({"loc": (end_lat, end_lng), "type": "end"})
+
+                # ---- Distance Matrix ----
+                def create_distance_matrix(loc_list):
+                    size = len(loc_list)
+                    matrix = {}
+                    for i in range(size):
+                        matrix[i] = {}
+                        for j in range(size):
+                            matrix[i][j] = int(geodesic(loc_list[i]["loc"], loc_list[j]["loc"]).km * 1000)
+                    return matrix
+
+                dist_matrix = create_distance_matrix(route_nodes)
+
+                # ---- OR-Tools Setup ----
+                if has_start_end:
+                    starts = [0]
+                    ends = [len(route_nodes) - 1]
+                    manager = pywrapcp.RoutingIndexManager(len(dist_matrix), 1, starts, ends)
+                else:
+                    manager = pywrapcp.RoutingIndexManager(len(dist_matrix), 1, 0)
+                
+                routing = pywrapcp.RoutingModel(manager)
+
+                def distance_callback(from_index, to_index):
+                    return dist_matrix[manager.IndexToNode(from_index)][manager.IndexToNode(to_index)]
+
+                transit_callback_index = routing.RegisterTransitCallback(distance_callback)
+                routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
+
+                # ---- Solve ----
+                search_parameters = pywrapcp.DefaultRoutingSearchParameters()
+                search_parameters.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+
+                solution = routing.SolveWithParameters(search_parameters)
+
+                if not solution:
+                    for lo in located_orders:
+                        optimized_orders.append(lo["order"])
+                else:
+                    # ---- Extract Route ----
+                    index = routing.Start(0)
+                    while not routing.IsEnd(index):
+                        node_index = manager.IndexToNode(index)
+                        node = route_nodes[node_index]
+                        if node.get("type") == "order":
+                            optimized_orders.append(node["order"])
+                        index = solution.Value(routing.NextVar(index))
+            except Exception as e:
+                # Fallback in case of error
+                for lo in located_orders:
+                    optimized_orders.append(lo["order"])
 
     final_sequence = optimized_orders + unlocated_orders
 
@@ -975,12 +1058,27 @@ def start_vehicle_trip(vehicle_id: str):
                 cid = ObjectId(cid)
             cust = customers_collection.find_one({"_id": cid})
 
+        emp_name = "N/A"
+        emp_id = o.get("assigned_employee_id") or (cust.get("assigned_employee_id") if cust else None)
+        if emp_id:
+            if isinstance(emp_id, str) and ObjectId.is_valid(emp_id):
+                emp_id = ObjectId(emp_id)
+            elif isinstance(emp_id, str):
+                # Try finding by reference if it's a raw string (like older firebase ids)
+                pass
+            
+            user = users_collection.find_one({"_id": emp_id})
+            if user and user.get("name"):
+                emp_name = user["name"]
+
         customer_stops.append({
             "order_id": str(o["_id"]),
             "order_no": o.get("order_no"),
             "customer_name": cust.get("name") if cust else "N/A",
             "customer_phone": cust.get("phone") or cust.get("mobile") if cust else None,
             "address": cust.get("address") or cust.get("shipping_address") or cust.get("billing_address") if cust else None,
+            "location": cust.get("location") if cust else None,
+            "assigned_employee_name": emp_name,
             "payment_mode": o.get("payment_mode"),
             "grand_total": round(float(o.get("grand_total", 0.0)), 2),
             "item_count": len(o.get("items", [])),
@@ -1013,6 +1111,22 @@ def start_vehicle_trip(vehicle_id: str):
 
     total_trip_amount = round(sum(float(o.get("grand_total", 0.0) or 0.0) for o in final_sequence), 2)
 
+    # ---- Google Maps URL ----
+    coords = []
+    
+    if start_lat is not None and start_lng is not None:
+        coords.append(f"{start_lat},{start_lng}")
+
+    for stop in customer_stops:
+        loc = stop.get("location")
+        if loc and loc.get("lat") is not None and loc.get("lng") is not None:
+            coords.append(f"{loc['lat']},{loc['lng']}")
+
+    if end_lat is not None and end_lng is not None:
+        coords.append(f"{end_lat},{end_lng}")
+        
+    maps_url = "https://www.google.com/maps/dir/" + "/".join(coords) if coords else ""
+
     trip_doc = {
         "vehicle_id": v_oid,
         "status": "in_progress",
@@ -1020,14 +1134,16 @@ def start_vehicle_trip(vehicle_id: str):
         "customer_stops": customer_stops,
         "consolidated_items": consolidated_items,
         "total_trip_amount": total_trip_amount,
-        "total_orders": len(final_sequence)
+        "total_orders": len(final_sequence),
+        "maps_url": maps_url
     }
     active_routes_collection.insert_one(trip_doc)
 
     return convert_utc_to_ist({
         "success": True,
         "message": "Trip successfully started and route sequence locked.",
-        "trip_id": str(trip_doc["_id"])
+        "trip_id": str(trip_doc["_id"]),
+        "maps_url": maps_url
     })
 
 
