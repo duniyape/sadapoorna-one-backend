@@ -5,8 +5,8 @@ MONGO_URL ="mongodb+srv://igold:gold0011@igold.eazpfbp.mongodb.net/?retryWrites=
 
 client = MongoClient(MONGO_URL)
 
-# DB_NAME = "sadapoorna_local"
-DB_NAME = "sadapoorna_production"
+DB_NAME = "sadapoorna_local"
+# DB_NAME = "sadapoorna_production"
 
 
 db = client[DB_NAME]

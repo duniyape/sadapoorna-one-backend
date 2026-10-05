@@ -1074,7 +1074,9 @@ def start_vehicle_trip(vehicle_id: str, data: StartTripRequest):
         customer_stops.append({
             "order_id": str(o["_id"]),
             "order_no": o.get("order_no"),
+            "customer_id": str(cust["_id"]) if cust else None,
             "customer_name": cust.get("name") if cust else "N/A",
+            "company_name": cust.get("company_name") or cust.get("shop_name") or cust.get("shopname") if cust else None,
             "customer_phone": cust.get("phone") or cust.get("mobile") if cust else None,
             "address": cust.get("address") or cust.get("shipping_address") or cust.get("billing_address") if cust else None,
             "location": cust.get("location") if cust else None,
