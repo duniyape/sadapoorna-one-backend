@@ -22,6 +22,7 @@ from routes.accounting import router as accounting_router
 from routes.voucher import router as voucher_router
 from routes.location import router as location_router
 from routes.address import router as address_router
+from routes.visits import router as visits_router
 
 from fastapi.middleware.cors import CORSMiddleware
 app = FastAPI()
@@ -57,6 +58,7 @@ app.include_router(accounting_router, prefix="/accounting", tags=["Accounting"])
 app.include_router(voucher_router, prefix="/accounting/vouchers", tags=["Accounting Vouchers"])
 app.include_router(location_router)
 app.include_router(address_router)
+app.include_router(visits_router)
 
 
 @app.get("/")

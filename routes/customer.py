@@ -470,8 +470,8 @@ def create_customer(
         ),
 
         "beat_id": (
-            customer.beat_id.strip()
-            if customer.beat_id
+            ObjectId(customer.beat_id.strip())
+            if customer.beat_id and ObjectId.is_valid(customer.beat_id.strip())
             else None
         ),
 
@@ -886,9 +886,7 @@ def get_customers(
                 "gst_number"
             ),
 
-            "beat_id": customer.get(
-                "beat_id"
-            ),
+            "beat_id": str(customer.get("beat_id")) if customer.get("beat_id") else None,
 
             "billing_address": customer.get(
                 "billing_address"
@@ -1142,11 +1140,7 @@ def get_customer(
                 )
             ),
 
-            "beat_id": (
-                customer.get(
-                    "beat_id"
-                )
-            ),
+            "beat_id": str(customer.get("beat_id")) if customer.get("beat_id") else None,
 
             # -----------------------------------
             # Address
@@ -1451,8 +1445,8 @@ def update_customer(
         ),
 
         "beat_id": (
-            customer.beat_id.strip()
-            if customer.beat_id
+            ObjectId(customer.beat_id.strip())
+            if customer.beat_id and ObjectId.is_valid(customer.beat_id.strip())
             else None
         ),
 

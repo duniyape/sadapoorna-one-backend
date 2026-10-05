@@ -5,8 +5,8 @@ MONGO_URL ="mongodb+srv://igold:gold0011@igold.eazpfbp.mongodb.net/?retryWrites=
 
 client = MongoClient(MONGO_URL)
 
-# DB_NAME = "sadapoorna_local"
-DB_NAME = "sadapoorna_production"
+DB_NAME = "sadapoorna_local"
+# DB_NAME = "sadapoorna_production"
 
 
 db = client[DB_NAME]
@@ -33,6 +33,7 @@ counters_collection = db["counter"]
 whatsapp_chats_collection = db["whatsapp_chats"]
 whatsapp_messages_collection = db["whatsapp_messages"]
 beats_collection = db["beats"]
+visit_logs_collection = db["visit_logs"]
 
 groups_collection = db["accounting_groups"]
 subgroups_collection = db["accounting_subgroups"]
